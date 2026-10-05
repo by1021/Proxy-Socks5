@@ -1,0 +1,1776 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>北极光代理 · 实时监控与真实节点分发系统</title>
+    <style>
+        :root, [data-theme="dark"] {
+            --bg-base: #070b14;
+            --bg-gradient: 
+                radial-gradient(circle at 10% 15%, rgba(56, 189, 248, 0.09) 0%, transparent 45%),
+                radial-gradient(circle at 90% 85%, rgba(168, 85, 247, 0.09) 0%, transparent 45%),
+                radial-gradient(circle at 50% 50%, rgba(6, 182, 212, 0.04) 0%, transparent 60%);
+            --card-bg: rgba(17, 24, 39, 0.75);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --card-hover: rgba(30, 41, 59, 0.85);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --text-dim: #64748b;
+            --primary: #38bdf8;
+            --primary-glow: rgba(56, 189, 248, 0.25);
+            --https-color: #06b6d4;
+            --https-bg: rgba(6, 182, 212, 0.12);
+            --https-border: rgba(6, 182, 212, 0.35);
+            --socks5-color: #a855f7;
+            --socks5-bg: rgba(168, 85, 247, 0.12);
+            --socks5-border: rgba(168, 85, 247, 0.35);
+            --http-color: #3b82f6;
+            --http-bg: rgba(59, 130, 246, 0.12);
+            --http-border: rgba(59, 130, 246, 0.35);
+            --success: #10b981;
+            --amber: #f59e0b;
+            --input-bg: rgba(0, 0, 0, 0.35);
+            --input-border: rgba(255, 255, 255, 0.08);
+            --table-head-bg: rgba(0, 0, 0, 0.35);
+            --table-row-hover: rgba(255, 255, 255, 0.035);
+            --table-border: rgba(255, 255, 255, 0.04);
+            --tab-bar-bg: rgba(0, 0, 0, 0.3);
+            --tab-active-bg: rgba(255, 255, 255, 0.12);
+            --tab-active-text: #ffffff;
+            --btn-sec-bg: rgba(255, 255, 255, 0.06);
+            --btn-sec-text: #f8fafc;
+            --btn-sec-border: rgba(255, 255, 255, 0.08);
+            --btn-sec-hover: rgba(255, 255, 255, 0.12);
+            --api-item-bg: rgba(0, 0, 0, 0.3);
+            --tag-dc-bg: rgba(148, 163, 184, 0.15);
+            --tag-dc-color: #cbd5e1;
+            --tag-dc-border: rgba(148, 163, 184, 0.25);
+            --modal-overlay: rgba(0, 0, 0, 0.65);
+            --modal-bg: #111827;
+            --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.35);
+        }
+
+        [data-theme="light"] {
+            --bg-base: #f8fafc;
+            --bg-gradient: 
+                radial-gradient(circle at 10% 15%, rgba(56, 189, 248, 0.12) 0%, transparent 45%),
+                radial-gradient(circle at 90% 85%, rgba(168, 85, 247, 0.12) 0%, transparent 45%),
+                radial-gradient(circle at 50% 50%, rgba(6, 182, 212, 0.04) 0%, transparent 60%);
+            --card-bg: rgba(255, 255, 255, 0.85);
+            --card-border: rgba(226, 232, 240, 0.9);
+            --card-hover: #ffffff;
+            --text-main: #0f172a;
+            --text-muted: #475569;
+            --text-dim: #94a3b8;
+            --primary: #0284c7;
+            --primary-glow: rgba(2, 132, 199, 0.2);
+            --https-color: #0891b2;
+            --https-bg: rgba(6, 182, 212, 0.12);
+            --https-border: rgba(6, 182, 212, 0.35);
+            --socks5-color: #9333ea;
+            --socks5-bg: rgba(168, 85, 247, 0.12);
+            --socks5-border: rgba(168, 85, 247, 0.35);
+            --http-color: #2563eb;
+            --http-bg: rgba(59, 130, 246, 0.12);
+            --http-border: rgba(59, 130, 246, 0.35);
+            --success: #059669;
+            --amber: #d97706;
+            --input-bg: #ffffff;
+            --input-border: #cbd5e1;
+            --table-head-bg: #f1f5f9;
+            --table-row-hover: #f8fafc;
+            --table-border: #e2e8f0;
+            --tab-bar-bg: #f1f5f9;
+            --tab-active-bg: #ffffff;
+            --tab-active-text: #0f172a;
+            --btn-sec-bg: #ffffff;
+            --btn-sec-text: #334155;
+            --btn-sec-border: #cbd5e1;
+            --btn-sec-hover: #f1f5f9;
+            --api-item-bg: rgba(255, 255, 255, 0.9);
+            --tag-dc-bg: rgba(100, 116, 139, 0.1);
+            --tag-dc-color: #475569;
+            --tag-dc-border: rgba(100, 116, 139, 0.25);
+            --modal-overlay: rgba(15, 23, 42, 0.45);
+            --modal-bg: #ffffff;
+            --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.06);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; transition: background-color 0.25s ease, border-color 0.25s ease; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: var(--bg-base);
+            background-image: var(--bg-gradient);
+            color: var(--text-main);
+            min-height: 100vh;
+            padding: 30px 20px 60px;
+            line-height: 1.5;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+            padding: 24px 30px;
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            box-shadow: var(--shadow-card);
+            margin-bottom: 24px;
+        }
+        .brand-box { display: flex; align-items: center; gap: 16px; }
+        .brand-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #0284c7, #9333ea);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            box-shadow: 0 4px 16px rgba(147, 51, 234, 0.35);
+        }
+        .brand-text h1 {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            background: linear-gradient(to right, #38bdf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .ver-badge {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 20px;
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--primary);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            -webkit-text-fill-color: var(--primary);
+        }
+        .brand-subtitle { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+        .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border-radius: 30px;
+            background: rgba(16, 185, 129, 0.12);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            color: var(--success);
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            box-shadow: 0 0 10px #10b981;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+        .btn {
+            cursor: pointer;
+            border: none;
+            outline: none;
+            padding: 9px 16px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #0284c7, #2563eb);
+            color: #fff;
+            box-shadow: 0 4px 14px rgba(2, 132, 199, 0.35);
+        }
+        .btn-primary:hover {
+            background: linear-gradient(135deg, #0369a1, #1d4ed8);
+            transform: translateY(-1px);
+        }
+        .btn-secondary {
+            background: var(--btn-sec-bg);
+            color: var(--btn-sec-text);
+            border: 1px solid var(--btn-sec-border);
+        }
+        .btn-secondary:hover {
+            background: var(--btn-sec-hover);
+        }
+        .theme-toggle-btn {
+            background: var(--btn-sec-bg);
+            border: 1px solid var(--btn-sec-border);
+            color: var(--text-main);
+            padding: 8px 12px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+        .theme-toggle-btn:hover { background: var(--btn-sec-hover); }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .stat-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+            box-shadow: var(--shadow-card);
+            cursor: pointer;
+        }
+        .stat-card:hover {
+            transform: translateY(-3px);
+            border-color: rgba(56, 189, 248, 0.4);
+        }
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 3px;
+        }
+        .stat-card.all::before { background: linear-gradient(90deg, #38bdf8, #818cf8); }
+        .stat-card.https::before { background: linear-gradient(90deg, #06b6d4, #22d3ee); }
+        .stat-card.socks5::before { background: linear-gradient(90deg, #a855f7, #c084fc); }
+        .stat-card.http::before { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+        .stat-card.monitor::before { background: linear-gradient(90deg, #10b981, #34d399); }
+        .stat-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: var(--text-muted);
+            font-size: 13px;
+            font-weight: 500;
+        }
+        .stat-value {
+            font-size: 32px;
+            font-weight: 800;
+            margin: 10px 0 4px;
+            letter-spacing: -1px;
+        }
+        .stat-card.all .stat-value { color: var(--primary); }
+        .stat-card.https .stat-value { color: var(--https-color); }
+        .stat-card.socks5 .stat-value { color: var(--socks5-color); }
+        .stat-card.http .stat-value { color: var(--http-color); }
+        .stat-card.monitor .stat-value { color: var(--success); font-size: 20px; font-weight: 700; margin-top: 14px; letter-spacing: 0; }
+        .stat-desc { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; }
+
+        .control-bar {
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 18px 20px;
+            margin-bottom: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            box-shadow: var(--shadow-card);
+        }
+        .filter-tabs {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--tab-bar-bg);
+            padding: 4px;
+            border-radius: 12px;
+            border: 1px solid var(--card-border);
+        }
+        .tab-btn {
+            cursor: pointer;
+            border: none;
+            outline: none;
+            background: transparent;
+            color: var(--text-muted);
+            padding: 7px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+        .tab-btn:hover { color: var(--text-main); }
+        .tab-btn.active {
+            background: var(--tab-active-bg);
+            color: var(--tab-active-text);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        }
+        .tab-badge {
+            padding: 1px 6px;
+            border-radius: 10px;
+            font-size: 11px;
+            background: rgba(148, 163, 184, 0.2);
+        }
+        .tab-btn.active .tab-badge {
+            background: var(--primary);
+            color: #ffffff;
+        }
+        .search-box { flex: 1; min-width: 240px; max-width: 380px; position: relative; }
+        .search-input {
+            width: 100%;
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 10px;
+            padding: 8px 14px 8px 36px;
+            color: var(--text-main);
+            font-size: 13px;
+            outline: none;
+        }
+        .search-input:focus { border-color: var(--primary); }
+        .search-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-dim);
+            font-size: 14px;
+        }
+        .action-buttons { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+        .table-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            overflow: hidden;
+            margin-bottom: 24px;
+            box-shadow: var(--shadow-card);
+        }
+        .table-responsive { width: 100%; overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+        thead { background: var(--table-head-bg); border-bottom: 1px solid var(--card-border); }
+        th {
+            padding: 14px 18px;
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            white-space: nowrap;
+        }
+        tbody tr { border-bottom: 1px solid var(--table-border); }
+        tbody tr:hover { background: var(--table-row-hover); }
+        td { padding: 14px 18px; color: var(--text-main); vertical-align: middle; white-space: nowrap; }
+        
+        .proto-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .proto-badge.https {
+            background: var(--https-bg);
+            color: var(--https-color);
+            border: 1px solid var(--https-border);
+        }
+        .proto-badge.socks5 {
+            background: var(--socks5-bg);
+            color: var(--socks5-color);
+            border: 1px solid var(--socks5-border);
+        }
+        .proto-badge.http {
+            background: var(--http-bg);
+            color: var(--http-color);
+            border: 1px solid var(--http-border);
+        }
+        .host-cell {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .host-cell:hover { background: rgba(56, 189, 248, 0.12); color: var(--primary); }
+        .tag-pill {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+            margin-right: 4px;
+        }
+        .tag-res { background: rgba(245, 158, 11, 0.15); color: var(--amber); border: 1px solid rgba(245, 158, 11, 0.3); }
+        .tag-nat { background: rgba(16, 185, 129, 0.15); color: var(--success); border: 1px solid rgba(16, 185, 129, 0.3); }
+        .tag-dc { background: var(--tag-dc-bg); color: var(--tag-dc-color); border: 1px solid var(--tag-dc-border); }
+
+        .action-icon-btn {
+            background: var(--btn-sec-bg);
+            border: 1px solid var(--btn-sec-border);
+            color: var(--text-muted);
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+            line-height: 1;
+            user-select: none;
+        }
+        .action-icon-btn:hover {
+            background: rgba(56, 189, 248, 0.2);
+            color: var(--primary);
+            border-color: rgba(56, 189, 248, 0.4);
+        }
+        .action-jump-btn {
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--primary);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            font-weight: 600;
+        }
+        .action-jump-btn:hover {
+            background: var(--primary);
+            color: #070b14;
+            border-color: var(--primary);
+            box-shadow: 0 0 10px var(--primary-glow);
+        }
+
+        .api-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: var(--shadow-card);
+        }
+        .api-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 17px;
+            font-weight: 700;
+            color: var(--text-main);
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--card-border);
+        }
+        .api-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+            gap: 14px;
+        }
+        .api-item {
+            background: var(--api-item-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 14px 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+        }
+        .api-title-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .api-name { font-weight: 600; font-size: 13px; color: var(--text-main); }
+        .api-url {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            color: var(--primary);
+            word-break: break-all;
+            background: rgba(56, 189, 248, 0.08);
+            padding: 6px 10px;
+            border-radius: 6px;
+            border: 1px dashed rgba(56, 189, 248, 0.25);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+        .api-code-link {
+            text-decoration: none;
+            color: var(--primary);
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            transition: opacity 0.2s;
+            cursor: pointer;
+        }
+        .api-code-link:hover {
+            opacity: 0.8;
+            text-decoration: underline;
+        }
+        .api-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+
+        /* 表格分页组件样式 */
+        .pagination-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 14px;
+            padding: 12px 20px;
+            border-top: 1px solid var(--card-border);
+            background: rgba(0, 0, 0, 0.15);
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+        [data-theme="light"] .pagination-bar {
+            background: rgba(0, 0, 0, 0.02);
+        }
+        .pagination-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+        .pagination-info strong {
+            color: var(--text-main);
+            font-weight: 600;
+        }
+        .pagination-separator {
+            color: var(--text-dim);
+            opacity: 0.5;
+        }
+        .pagination-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .page-size-selector {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .page-select {
+            background: var(--input-bg);
+            color: var(--text-main);
+            border: 1px solid var(--input-border);
+            border-radius: 8px;
+            padding: 5px 8px;
+            font-size: 12px;
+            outline: none;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .page-select:focus, .page-select:hover {
+            border-color: var(--primary);
+        }
+        .page-select option {
+            background: var(--modal-bg);
+            color: var(--text-main);
+        }
+        .pagination-buttons {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .page-btn {
+            background: var(--btn-sec-bg);
+            color: var(--btn-sec-text);
+            border: 1px solid var(--btn-sec-border);
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 32px;
+            height: 30px;
+            user-select: none;
+        }
+        .page-btn:hover:not(:disabled) {
+            background: var(--btn-sec-hover);
+            color: var(--primary);
+            border-color: rgba(56, 189, 248, 0.4);
+        }
+        .page-btn:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+        .page-btn.active {
+            background: var(--primary);
+            color: #070b14;
+            font-weight: 700;
+            border-color: var(--primary);
+            box-shadow: 0 0 10px var(--primary-glow);
+        }
+        .page-numbers {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .page-ellipsis {
+            color: var(--text-dim);
+            padding: 0 4px;
+            font-size: 12px;
+            user-select: none;
+        }
+        .page-jump {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .jump-input {
+            width: 44px;
+            background: var(--input-bg);
+            color: var(--text-main);
+            border: 1px solid var(--input-border);
+            border-radius: 6px;
+            padding: 5px 4px;
+            text-align: center;
+            font-size: 12px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .jump-input:focus {
+            border-color: var(--primary);
+        }
+        .jump-btn {
+            padding: 5px 9px;
+            height: 30px;
+        }
+        .api-desc { font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.4; }
+
+        /* Modal 弹窗 */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: var(--modal-overlay);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 10000;
+            padding: 20px;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal-box {
+            background: var(--modal-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            width: 100%;
+            max-width: 540px;
+            padding: 26px 30px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+            animation: modalIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes modalIn {
+            from { transform: scale(0.92) translateY(20px); opacity: 0; }
+            to { transform: scale(1) translateY(0); opacity: 1; }
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--card-border);
+        }
+        .modal-title { font-size: 18px; font-weight: 700; color: var(--text-main); display: flex; align-items: center; gap: 8px; }
+        .modal-close {
+            background: transparent;
+            border: none;
+            font-size: 20px;
+            color: var(--text-dim);
+            cursor: pointer;
+            padding: 4px;
+            line-height: 1;
+        }
+        .modal-close:hover { color: var(--text-main); }
+        .form-group { margin-bottom: 20px; }
+        .form-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-main); margin-bottom: 8px; }
+        .form-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+        .form-input-group { display: flex; align-items: center; gap: 10px; }
+        .form-input {
+            flex: 1;
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 10px;
+            padding: 10px 14px;
+            color: var(--text-main);
+            font-size: 14px;
+            outline: none;
+        }
+        .form-input:focus { border-color: var(--primary); }
+        .unit-label { font-size: 13px; color: var(--text-muted); font-weight: 600; }
+        .preset-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+        .preset-pill {
+            background: var(--btn-sec-bg);
+            border: 1px solid var(--btn-sec-border);
+            color: var(--text-muted);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .preset-pill:hover, .preset-pill.active {
+            background: var(--primary) !important;
+            color: #ffffff !important;
+            border-color: var(--primary) !important;
+            box-shadow: 0 2px 8px var(--primary-glow) !important;
+            font-weight: 600 !important;
+        }
+        .default-hint {
+            background: rgba(56, 189, 248, 0.08);
+            border: 1px dashed rgba(56, 189, 248, 0.3);
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 12px;
+            color: var(--primary);
+            margin-bottom: 20px;
+        }
+        .modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 24px;
+            padding-top: 14px;
+            border-top: 1px solid var(--card-border);
+        }
+
+        #toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: var(--modal-bg);
+            color: var(--text-main);
+            border: 1px solid var(--card-border);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+            padding: 12px 20px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: 99999;
+        }
+        #toast.show { transform: translateY(0); opacity: 1; }
+        .empty-state { padding: 40px 20px; text-align: center; color: var(--text-dim); }
+        .empty-icon { font-size: 40px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="brand-box">
+                <div class="brand-icon">⚡</div>
+                <div class="brand-text">
+                    <h1>北极光代理分发系统 <span class="ver-badge">v2.5 全协议版</span></h1>
+                    <div class="brand-subtitle">HTTPS (SSL安全隧道) · SOCKS5 · HTTP 深度真实验证 | C 段智能无损脱敏还原</div>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button class="theme-toggle-btn" id="theme-btn" onclick="toggleTheme()" title="切换白天/黑夜模式">
+                    <span id="theme-icon">☀️</span> <span id="theme-text">浅色模式</span>
+                </button>
+                <button class="btn btn-secondary" onclick="openSettingsModal()" title="设置检测时间与采集频率">
+                    <span>⚙️</span> 检测设置
+                </button>
+                <div class="status-pill">
+                    <span class="pulse-dot"></span>
+                    <span id="service-status-text">系统监控运行中</span>
+                </div>
+                <button class="btn btn-primary" id="btn-trigger" onclick="triggerImmediatePoll()">
+                    <span>🔄</span> 立即采集检测
+                </button>
+            </div>
+        </header>
+
+        <div class="stats-grid">
+            <div class="stat-card all" onclick="setProtocolFilter('')">
+                <div class="stat-head"><span>总有效节点</span><span>🌐</span></div>
+                <div class="stat-value" id="stat-total">0</div>
+                <div class="stat-desc">已入库且校验通过的全部节点</div>
+            </div>
+            <div class="stat-card https" onclick="setProtocolFilter('https')">
+                <div class="stat-head"><span>HTTPS 代理 (NEW)</span><span>🔒</span></div>
+                <div class="stat-value" id="stat-https">0</div>
+                <div class="stat-desc">TLS 握手 + 443 安全隧道已验证</div>
+            </div>
+            <div class="stat-card socks5" onclick="setProtocolFilter('socks5')">
+                <div class="stat-head"><span>SOCKS5 代理</span><span>⚡</span></div>
+                <div class="stat-value" id="stat-socks5">0</div>
+                <div class="stat-desc">握手确认 + CONNECT 转发已通</div>
+            </div>
+            <div class="stat-card http" onclick="setProtocolFilter('http')">
+                <div class="stat-head"><span>HTTP 代理</span><span>🌍</span></div>
+                <div class="stat-value" id="stat-http">0</div>
+                <div class="stat-desc">CONNECT / GET 真实穿透已通</div>
+            </div>
+            <div class="stat-card monitor" onclick="openSettingsModal()">
+                <div class="stat-head"><span>轮询状态与时间</span><span>⏱️</span></div>
+                <div class="stat-value" id="stat-round">第 0 轮</div>
+                <div class="stat-desc" id="stat-interval-info" style="font-weight:600; color:var(--text-main); margin-top:2px;">周期: 60秒/轮 · 倒计时: --s</div>
+                <div class="stat-desc" id="stat-last-time" style="margin-top:2px;">最近: 尚未轮询</div>
+            </div>
+        </div>
+
+        <div class="control-bar">
+            <div class="filter-tabs">
+                <button class="tab-btn active" id="tab-all" onclick="setProtocolFilter('')">
+                    全部 <span class="tab-badge" id="badge-all">0</span>
+                </button>
+                <button class="tab-btn" id="tab-https" onclick="setProtocolFilter('https')">
+                    🔒 HTTPS <span class="tab-badge" id="badge-https">0</span>
+                </button>
+                <button class="tab-btn" id="tab-socks5" onclick="setProtocolFilter('socks5')">
+                    ⚡ SOCKS5 <span class="tab-badge" id="badge-socks5">0</span>
+                </button>
+                <button class="tab-btn" id="tab-http" onclick="setProtocolFilter('http')">
+                    🌐 HTTP <span class="tab-badge" id="badge-http">0</span>
+                </button>
+            </div>
+
+            <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" class="search-input" id="search-input" placeholder="搜索 IP、端口、国家省市、标签..." oninput="handleSearch(this.value)">
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-secondary" onclick="copyCurrentPageNodes()">📄 复制当前页</button>
+                <button class="btn btn-secondary" onclick="copyFilteredNodes()">📋 复制全部筛选</button>
+                <button class="btn btn-secondary" onclick="exportData('txt')">📥 导出 TXT</button>
+                <button class="btn btn-secondary" onclick="exportData('json')">📥 导出 JSON</button>
+            </div>
+        </div>
+
+        <div class="table-card">
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 110px;">协议类型</th>
+                            <th style="width: 260px;">真实节点地址 (真实IP:端口)</th>
+                            <th>归属国家 / 地区</th>
+                            <th style="width: 180px;">属性标签</th>
+                            <th style="width: 160px;">入库发现时间</th>
+                            <th style="width: 140px; text-align: right;">快捷操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="proxy-tbody">
+                        <tr><td colspan="6" class="empty-state"><div class="empty-icon">⏳</div>正在加载已验证节点数据...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 分页控制栏 -->
+            <div class="pagination-bar" id="pagination-bar">
+                <div class="pagination-info">
+                    <span>共 <strong id="page-total-count">0</strong> 个节点</span>
+                    <span class="pagination-separator">|</span>
+                    <span>第 <strong id="page-current-num">1</strong> / <strong id="page-total-num">1</strong> 页</span>
+                    <span class="pagination-separator">|</span>
+                    <span id="page-range-info">正在统计...</span>
+                </div>
+
+                <div class="pagination-controls">
+                    <div class="page-size-selector">
+                        <label for="page-size-select" style="font-size: 12px; color: var(--text-dim); margin-right: 2px;">每页:</label>
+                        <select id="page-size-select" class="page-select" onchange="changePageSize(this.value)">
+                            <option value="15">15 条/页</option>
+                            <option value="25" selected>25 条/页</option>
+                            <option value="50">50 条/页</option>
+                            <option value="100">100 条/页</option>
+                            <option value="200">200 条/页</option>
+                            <option value="999999">全部显示</option>
+                        </select>
+                    </div>
+
+                    <div class="pagination-buttons">
+                        <button class="page-btn" id="btn-first-page" onclick="goToPage(1)" title="首页">⏮</button>
+                        <button class="page-btn" id="btn-prev-page" onclick="changePage(-1)" title="上一页">◀ 上一页</button>
+                        <div class="page-numbers" id="page-numbers-container"></div>
+                        <button class="page-btn" id="btn-next-page" onclick="changePage(1)" title="下一页">下一页 ▶</button>
+                        <button class="page-btn" id="btn-last-page" onclick="goToLastPage()" title="末页">⏭</button>
+                    </div>
+
+                    <div class="page-jump">
+                        <span style="font-size: 12px; color: var(--text-dim);">跳至</span>
+                        <input type="number" id="page-jump-input" class="jump-input" min="1" placeholder="1" onkeydown="if(event.key==='Enter') jumpToInputPage()">
+                        <span style="font-size: 12px; color: var(--text-dim);">页</span>
+                        <button class="page-btn jump-btn" onclick="jumpToInputPage()">确定</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="api-card">
+            <div class="api-head">
+                <span>🔗 快捷订阅与标准化 API 端点</span>
+            </div>
+            <div class="api-grid">
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">🌟 全部有效代理列表</span>
+                        <span class="ver-badge">标准格式</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/nodes.txt" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/nodes.txt</code></a>
+                        <div class="api-actions">
+                            <a href="/nodes.txt" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/nodes.txt')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">格式：<code>protocol://ip:port</code>，支持直接作为代理池订阅源或爬虫轮询。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">🔒 专属 HTTPS 代理端点 (NEW)</span>
+                        <span class="proto-badge https">HTTPS</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/https.txt" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/https.txt</code></a>
+                        <div class="api-actions">
+                            <a href="/https.txt" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/https.txt')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">仅输出严格通过 TLS 握手及安全隧道校验的 HTTPS 节点列表。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">⚡ 专属 SOCKS5 代理端点</span>
+                        <span class="proto-badge socks5">SOCKS5</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/socks5.txt" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/socks5.txt</code></a>
+                        <div class="api-actions">
+                            <a href="/socks5.txt" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/socks5.txt')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">仅输出纯 SOCKS5 协议节点，适用于各类全局代理客户端与流量工具。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">🌐 专属 HTTP 代理端点</span>
+                        <span class="proto-badge http">HTTP</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/http.txt" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/http.txt</code></a>
+                        <div class="api-actions">
+                            <a href="/http.txt" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/http.txt')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">仅输出纯 HTTP 代理节点，适用于常规 Web 爬虫与轻量脚本。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">⚙️ 纯 IP:Port 模式</span>
+                        <span class="ver-badge">无前缀</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/nodes.txt?raw=1" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/nodes.txt?raw=1</code></a>
+                        <div class="api-actions">
+                            <a href="/nodes.txt?raw=1" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/nodes.txt?raw=1')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">格式为 <code>ip:port</code>，去掉协议头，直接适配各类原生网络库与批量测试。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">📊 完整元数据档案</span>
+                        <span class="ver-badge">含地区属性</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/detail.txt" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/detail.txt</code></a>
+                        <div class="api-actions">
+                            <a href="/detail.txt" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/detail.txt')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">每行包含入库时间、协议、真实 IP 端口、详细地理位置与网络属性标签。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">🔌 结构化 JSON 列表</span>
+                        <span class="ver-badge">REST API</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/api/proxies" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/api/proxies</code></a>
+                        <div class="api-actions">
+                            <a href="/api/proxies" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/api/proxies')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">JSON 格式代理数组，支持 <code>?type=https</code> 及 <code>?search=关键词</code> 查询。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">📈 服务状态与统计</span>
+                        <span class="ver-badge">监控指标</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/api/stats" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/api/stats</code></a>
+                        <div class="api-actions">
+                            <a href="/api/stats" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/api/stats')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">返回采集轮次、各协议存量节点分布、运行健康状态与最新轮询信息。</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 参数设置 Modal 弹窗 -->
+    <div class="modal-overlay" id="settings-modal" onclick="handleModalOverlayClick(event)">
+        <div class="modal-box">
+            <div class="modal-header">
+                <div class="modal-title"><span>⚙️</span> 检测频率与参数设置</div>
+                <button class="modal-close" onclick="closeSettingsModal()">&times;</button>
+            </div>
+            
+            <div class="default-hint">
+                💡 <b>当前系统出厂默认值：</b>轮询采集频率 <b>60 秒/轮</b>，协议单次检测超时 <b>1.8 秒</b>。
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">轮询检测频率 (采集周期)</label>
+                <div class="form-desc">控制后台自动访问目标站点并探测新节点的间隔时间（建议 30 ~ 300 秒）。</div>
+                <div class="form-input-group">
+                    <input type="number" class="form-input" id="cfg-interval" min="10" max="3600" step="5" value="60" oninput="updatePresetIntervalUI(parseInt(this.value))">
+                    <span class="unit-label">秒 / 轮</span>
+                </div>
+                <div class="preset-pills" id="interval-presets">
+                    <span class="preset-pill" data-val="30" onclick="setPresetInterval(30)">30秒 (高频)</span>
+                    <span class="preset-pill active" data-val="60" onclick="setPresetInterval(60)">60秒 (默认)</span>
+                    <span class="preset-pill" data-val="120" onclick="setPresetInterval(120)">120秒 (2分钟)</span>
+                    <span class="preset-pill" data-val="300" onclick="setPresetInterval(300)">300秒 (5分钟)</span>
+                    <span class="preset-pill" data-val="600" onclick="setPresetInterval(600)">600秒 (10分钟)</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">单次协议探测超时时间</label>
+                <div class="form-desc">对每个 C 段候选节点进行 TCP / TLS / SOCKS5 连接握手的单次超时。</div>
+                <div class="form-input-group">
+                    <input type="number" class="form-input" id="cfg-timeout" min="0.5" max="10" step="0.1" value="1.8" oninput="updatePresetTimeoutUI(parseFloat(this.value))">
+                    <span class="unit-label">秒</span>
+                </div>
+                <div class="preset-pills" id="timeout-presets">
+                    <span class="preset-pill" data-val="1.0" onclick="setPresetTimeout(1.0)">1.0秒 (高速)</span>
+                    <span class="preset-pill active" data-val="1.8" onclick="setPresetTimeout(1.8)">1.8秒 (默认)</span>
+                    <span class="preset-pill" data-val="2.5" onclick="setPresetTimeout(2.5)">2.5秒 (平稳)</span>
+                    <span class="preset-pill" data-val="3.0" onclick="setPresetTimeout(3.0)">3.0秒 (宽容)</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">表格默认每页显示条数</label>
+                <div class="form-desc">控制节点列表默认每页展示的节点数量（也可在表格下方即时切换）。</div>
+                <div class="form-input-group">
+                    <select id="cfg-pagesize" class="form-input" style="cursor: pointer;">
+                        <option value="15">15 条 / 页</option>
+                        <option value="25" selected>25 条 / 页 (默认)</option>
+                        <option value="50">50 条 / 页</option>
+                        <option value="100">100 条 / 页</option>
+                        <option value="200">200 条 / 页</option>
+                        <option value="999999">全部显示 (不分页)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; color:var(--text-main);">
+                    <input type="checkbox" id="cfg-apply-now" checked>
+                    <span>保存设置后立即触发一轮新探测</span>
+                </label>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="resetToDefaults()">恢复默认值</button>
+                <button class="btn btn-secondary" onclick="closeSettingsModal()">取消</button>
+                <button class="btn btn-primary" id="btn-save-cfg" onclick="saveSettings()">💾 保存并应用</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast">
+        <span id="toast-icon">✅</span>
+        <span id="toast-msg">操作成功</span>
+    </div>
+    <script>
+        let allProxies = [];
+        let currentFilter = '';
+        let currentSearch = '';
+        let pollIntervalSec = 60;
+        let lastPollTimestamp = 0;
+        let countdownTimer = null;
+        let currentPage = 1;
+        let pageSize = 25;
+
+        function initPageSize() {
+            const saved = localStorage.getItem('proxy_page_size');
+            if (saved) {
+                const val = parseInt(saved);
+                if (!isNaN(val) && val > 0) {
+                    pageSize = val;
+                }
+            }
+            const barSelect = document.getElementById('page-size-select');
+            if (barSelect) barSelect.value = pageSize;
+            const modalSelect = document.getElementById('cfg-pagesize');
+            if (modalSelect) modalSelect.value = pageSize;
+        }
+
+        // ================= 白天 / 黑夜主题切换 =================
+        function initTheme() {
+            const savedTheme = localStorage.getItem('site-theme') || 'dark';
+            applyTheme(savedTheme);
+        }
+
+        function applyTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem('site-theme', theme);
+            const icon = document.getElementById('theme-icon');
+            const text = document.getElementById('theme-text');
+            if (theme === 'light') {
+                icon.innerText = '🌙';
+                text.innerText = '深色模式';
+            } else {
+                icon.innerText = '☀️';
+                text.innerText = '浅色模式';
+            }
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme') || 'dark';
+            const next = current === 'dark' ? 'light' : 'dark';
+            applyTheme(next);
+            showToast(next === 'light' ? '已切换至白天明亮模式' : '已切换至极光深色模式');
+        }
+
+        // ================= 检测参数 Modal 与配置 =================
+        function openSettingsModal() {
+            document.getElementById('settings-modal').classList.add('active');
+            const modalSelect = document.getElementById('cfg-pagesize');
+            if (modalSelect) modalSelect.value = pageSize;
+            fetch('/api/config')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.poll_interval) {
+                        document.getElementById('cfg-interval').value = data.poll_interval;
+                        updatePresetIntervalUI(data.poll_interval);
+                    }
+                    if (data.probe_timeout) {
+                        document.getElementById('cfg-timeout').value = data.probe_timeout;
+                        updatePresetTimeoutUI(data.probe_timeout);
+                    }
+                })
+                .catch(e => console.error('获取当前配置失败', e));
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settings-modal').classList.remove('active');
+        }
+
+        function handleModalOverlayClick(e) {
+            if (e.target.id === 'settings-modal') {
+                closeSettingsModal();
+            }
+        }
+
+        function setPresetInterval(sec) {
+            document.getElementById('cfg-interval').value = sec;
+            updatePresetIntervalUI(sec);
+        }
+
+        function updatePresetIntervalUI(sec) {
+            document.querySelectorAll('#interval-presets .preset-pill').forEach(pill => {
+                const val = parseInt(pill.getAttribute('data-val'));
+                if (val === sec) {
+                    pill.classList.add('active');
+                } else {
+                    pill.classList.remove('active');
+                }
+            });
+        }
+
+        function setPresetTimeout(sec) {
+            document.getElementById('cfg-timeout').value = sec;
+            updatePresetTimeoutUI(sec);
+        }
+
+        function updatePresetTimeoutUI(sec) {
+            document.querySelectorAll('#timeout-presets .preset-pill').forEach(pill => {
+                const val = parseFloat(pill.getAttribute('data-val'));
+                if (Math.abs(val - sec) < 0.05) {
+                    pill.classList.add('active');
+                } else {
+                    pill.classList.remove('active');
+                }
+            });
+        }
+
+        function resetToDefaults() {
+            document.getElementById('cfg-interval').value = 60;
+            updatePresetIntervalUI(60);
+            document.getElementById('cfg-timeout').value = 1.8;
+            updatePresetTimeoutUI(1.8);
+            const modalSelect = document.getElementById('cfg-pagesize');
+            if (modalSelect) modalSelect.value = 25;
+            pageSize = 25;
+            localStorage.setItem('proxy_page_size', 25);
+            const barSelect = document.getElementById('page-size-select');
+            if (barSelect) barSelect.value = 25;
+            renderTable(true);
+            showToast('已载入出厂默认值：60秒 / 1.8秒 / 每页25条');
+        }
+
+        function saveSettings() {
+            const interval = parseInt(document.getElementById('cfg-interval').value);
+            const timeout = parseFloat(document.getElementById('cfg-timeout').value);
+            const applyNow = document.getElementById('cfg-apply-now').checked;
+            const newPageSize = parseInt(document.getElementById('cfg-pagesize').value);
+
+            if (!isNaN(newPageSize) && newPageSize > 0) {
+                pageSize = newPageSize;
+                localStorage.setItem('proxy_page_size', newPageSize);
+                const barSelect = document.getElementById('page-size-select');
+                if (barSelect) barSelect.value = newPageSize;
+                renderTable(true);
+            }
+
+            if (isNaN(interval) || interval < 10 || interval > 3600) {
+                showToast('采集频率需在 10 ~ 3600 秒之间', false);
+                return;
+            }
+            if (isNaN(timeout) || timeout < 0.5 || timeout > 10.0) {
+                showToast('检测超时需在 0.5 ~ 10.0 秒之间', false);
+                return;
+            }
+
+            const saveBtn = document.getElementById('btn-save-cfg');
+            if (saveBtn) {
+                saveBtn.disabled = true;
+                saveBtn.innerText = '保存中...';
+            }
+
+            const payload = JSON.stringify({ interval, timeout, apply_now: applyNow });
+
+            // 先保存到本地 localStorage 确保前端参数立即可用
+            localStorage.setItem('cfg_interval', interval);
+            localStorage.setItem('cfg_timeout', timeout);
+
+            fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: payload
+            })
+            .then(async r => {
+                const ct = (r.headers.get('content-type') || '').toLowerCase();
+                if (!ct.includes('application/json')) {
+                    throw new Error('后台返回了 HTML 页面，说明 Python 进程仍是旧版本，请重启后台服务');
+                }
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(data => {
+                pollIntervalSec = data.poll_interval;
+                closeSettingsModal();
+                showToast(`设置已保存到 config.json！采集: ${data.poll_interval}秒，超时: ${data.probe_timeout}秒`);
+                updateCountdown();
+                setTimeout(loadData, 1000);
+            })
+            .catch(err => {
+                console.warn('POST 保存失败，尝试 GET 回退...', err);
+                fetch(`/api/config?interval=${interval}&timeout=${timeout}&apply_now=${applyNow ? '1' : '0'}`)
+                    .then(async r => {
+                        const ct = (r.headers.get('content-type') || '').toLowerCase();
+                        if (!ct.includes('application/json')) {
+                            throw new Error('后台进程仍运行着旧代码，请在控制台按 Ctrl+C 关闭并重新运行 start.bat 重启服务！');
+                        }
+                        return r.json();
+                    })
+                    .then(data => {
+                        pollIntervalSec = data.poll_interval;
+                        closeSettingsModal();
+                        showToast(`设置已保存到 config.json！采集: ${data.poll_interval}秒，超时: ${data.probe_timeout}秒`);
+                        updateCountdown();
+                        setTimeout(loadData, 1000);
+                    })
+                    .catch(e => {
+                        showToast('保存提示: ' + e.message, false);
+                    });
+            })
+            .finally(() => {
+                if (saveBtn) {
+                    saveBtn.disabled = false;
+                    saveBtn.innerText = '💾 保存并应用';
+                }
+            });
+        }
+
+        // ================= 倒计时与数据同步 =================
+        function updateCountdown() {
+            const intervalElem = document.getElementById('stat-interval-info');
+            if (!intervalElem) return;
+
+            if (lastPollTimestamp > 0 && pollIntervalSec > 0) {
+                const nowSec = Math.floor(Date.now() / 1000);
+                const elapsed = nowSec - lastPollTimestamp;
+                const remain = Math.max(0, pollIntervalSec - elapsed);
+                intervalElem.innerText = `周期: ${pollIntervalSec}s/轮 · 倒计时: ${remain}s`;
+            } else {
+                intervalElem.innerText = `周期: ${pollIntervalSec}s/轮 · 等待初始轮询`;
+            }
+        }
+
+        function showToast(msg, isSuccess = true) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toast-msg').innerText = msg;
+            document.getElementById('toast-icon').innerText = isSuccess ? '✅' : 'ℹ️';
+            toast.className = 'show';
+            setTimeout(() => { toast.className = ''; }, 2600);
+        }
+
+        function copyText(txt) {
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(txt).then(() => {
+                    showToast('已复制: ' + (txt.length > 40 ? txt.slice(0, 37) + '...' : txt));
+                }).catch(() => { fallbackCopy(txt); });
+            } else {
+                fallbackCopy(txt);
+            }
+        }
+
+        function fallbackCopy(txt) {
+            const ta = document.createElement('textarea');
+            ta.value = txt;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            showToast('已复制: ' + (txt.length > 40 ? txt.slice(0, 37) + '...' : txt));
+        }
+
+        function formatTags(tagStr) {
+            if (!tagStr) return '<span class="tag-pill tag-dc">机房</span>';
+            let html = '';
+            if (tagStr.includes('家宽')) html += '<span class="tag-pill tag-res">家宽</span>';
+            if (tagStr.includes('原生IP')) html += '<span class="tag-pill tag-nat">原生IP</span>';
+            if (tagStr.includes('机房')) html += '<span class="tag-pill tag-dc">机房</span>';
+            if (!html) html = `<span class="tag-pill tag-dc">${tagStr}</span>`;
+            return html;
+        }
+
+        function getFilteredProxies() {
+            let list = allProxies;
+            if (currentFilter) {
+                list = list.filter(p => p.protocol === currentFilter);
+            }
+            if (currentSearch) {
+                const q = currentSearch.toLowerCase();
+                list = list.filter(p => {
+                    const full = `${p.protocol} ${p.ip} ${p.port} ${p.location} ${p.tags}`.toLowerCase();
+                    return full.includes(q);
+                });
+            }
+            return list;
+        }
+
+        function renderTable(resetPage = false) {
+            const tbody = document.getElementById('proxy-tbody');
+            const list = getFilteredProxies();
+            const totalCount = list.length;
+            const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+
+            if (resetPage) {
+                currentPage = 1;
+            } else if (currentPage > totalPages) {
+                currentPage = totalPages;
+            } else if (currentPage < 1) {
+                currentPage = 1;
+            }
+
+            const totalCountElem = document.getElementById('page-total-count');
+            const currentNumElem = document.getElementById('page-current-num');
+            const totalNumElem = document.getElementById('page-total-num');
+            const rangeInfoElem = document.getElementById('page-range-info');
+            const jumpInput = document.getElementById('page-jump-input');
+
+            if (totalCountElem) totalCountElem.innerText = totalCount;
+            if (currentNumElem) currentNumElem.innerText = totalCount > 0 ? currentPage : 0;
+            if (totalNumElem) totalNumElem.innerText = totalPages;
+            if (jumpInput) {
+                jumpInput.max = totalPages;
+                jumpInput.placeholder = currentPage;
+            }
+
+            if (!list || totalCount === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><div class="empty-icon">📭</div>没有找到符合条件的节点</td></tr>`;
+                if (rangeInfoElem) rangeInfoElem.innerText = '暂无数据';
+                updatePaginationControls(0, 1);
+                return;
+            }
+
+            const startIdx = (currentPage - 1) * pageSize;
+            const endIdx = (pageSize >= 999999) ? totalCount : Math.min(startIdx + pageSize, totalCount);
+            const pageItems = (pageSize >= 999999) ? list : list.slice(startIdx, endIdx);
+
+            if (rangeInfoElem) {
+                rangeInfoElem.innerText = `显示第 ${startIdx + 1} - ${endIdx} 条`;
+            }
+
+            updatePaginationControls(currentPage, totalPages);
+
+            let html = '';
+            pageItems.forEach(p => {
+                const protoUpper = p.protocol.toUpperCase();
+                const icon = p.protocol === 'https' ? '🔒' : (p.protocol === 'socks5' ? '⚡' : '🌐');
+                const fullUrl = `${p.protocol}://${p.ip}:${p.port}`;
+                const rawUrl = `${p.ip}:${p.port}`;
+
+                html += `
+                <tr>
+                    <td>
+                        <span class="proto-badge ${p.protocol}">
+                            ${icon} ${protoUpper}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="host-cell" title="点击快速复制" onclick="copyText('${fullUrl}')">
+                            ${p.ip}:<span style="color:#facc15;">${p.port}</span>
+                        </span>
+                    </td>
+                    <td>
+                        <span style="color:var(--text-muted); margin-right:4px;">📍</span>${p.location || '未知'}
+                    </td>
+                    <td>
+                        ${formatTags(p.tags)}
+                    </td>
+                    <td style="color:var(--text-dim); font-size:12px;">
+                        ${p.entry_time}
+                    </td>
+                    <td style="text-align: right;">
+                        <button class="action-icon-btn" title="复制完整协议地址" onclick="copyText('${fullUrl}')">完整</button>
+                        <button class="action-icon-btn" title="复制纯IP:端口" onclick="copyText('${rawUrl}')">纯IP</button>
+                    </td>
+                </tr>`;
+            });
+
+            tbody.innerHTML = html;
+        }
+
+        function updatePaginationControls(currPage, totalPgs) {
+            const btnFirst = document.getElementById('btn-first-page');
+            const btnPrev = document.getElementById('btn-prev-page');
+            const btnNext = document.getElementById('btn-next-page');
+            const btnLast = document.getElementById('btn-last-page');
+
+            if (btnFirst) btnFirst.disabled = (currPage <= 1);
+            if (btnPrev) btnPrev.disabled = (currPage <= 1);
+            if (btnNext) btnNext.disabled = (currPage >= totalPgs || totalPgs <= 1);
+            if (btnLast) btnLast.disabled = (currPage >= totalPgs || totalPgs <= 1);
+
+            renderPageNumbers(totalPgs);
+        }
+
+        function renderPageNumbers(totalPages) {
+            const container = document.getElementById('page-numbers-container');
+            if (!container) return;
+            container.innerHTML = '';
+
+            if (totalPages <= 1) {
+                const btn = document.createElement('button');
+                btn.className = 'page-btn active';
+                btn.innerText = '1';
+                btn.disabled = true;
+                container.appendChild(btn);
+                return;
+            }
+
+            let pages = [];
+            if (totalPages <= 7) {
+                for (let i = 1; i <= totalPages; i++) pages.push(i);
+            } else {
+                if (currentPage <= 4) {
+                    pages = [1, 2, 3, 4, 5, '...', totalPages];
+                } else if (currentPage >= totalPages - 3) {
+                    pages = [1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+                } else {
+                    pages = [1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages];
+                }
+            }
+
+            pages.forEach(p => {
+                if (p === '...') {
+                    const span = document.createElement('span');
+                    span.className = 'page-ellipsis';
+                    span.innerText = '…';
+                    container.appendChild(span);
+                } else {
+                    const btn = document.createElement('button');
+                    btn.className = 'page-btn' + (p === currentPage ? ' active' : '');
+                    btn.innerText = p;
+                    btn.title = `第 ${p} 页`;
+                    btn.onclick = () => goToPage(p);
+                    container.appendChild(btn);
+                }
+            });
+        }
+
+        function goToPage(page) {
+            const list = getFilteredProxies();
+            const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+            const target = Math.max(1, Math.min(page, totalPages));
+            if (target !== currentPage) {
+                currentPage = target;
+                renderTable(false);
+            }
+        }
+
+        function changePage(delta) {
+            goToPage(currentPage + delta);
+        }
+
+        function goToLastPage() {
+            const list = getFilteredProxies();
+            const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+            goToPage(totalPages);
+        }
+
+        function changePageSize(val) {
+            const size = parseInt(val);
+            if (!isNaN(size) && size > 0) {
+                pageSize = size;
+                localStorage.setItem('proxy_page_size', size);
+                const modalSelect = document.getElementById('cfg-pagesize');
+                if (modalSelect) modalSelect.value = size;
+                const barSelect = document.getElementById('page-size-select');
+                if (barSelect) barSelect.value = size;
+                currentPage = 1;
+                renderTable(true);
+                showToast(`已切换为每页显示 ${size >= 999999 ? '全部' : size} 条`);
+            }
+        }
+
+        function jumpToInputPage() {
+            const input = document.getElementById('page-jump-input');
+            if (!input) return;
+            const page = parseInt(input.value);
+            const list = getFilteredProxies();
+            const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+            if (isNaN(page) || page < 1 || page > totalPages) {
+                showToast(`请输入 1 到 ${totalPages} 之间的有效页码`, false);
+                return;
+            }
+            goToPage(page);
+            input.value = '';
+        }
+
+        function copyCurrentPageNodes() {
+            const list = getFilteredProxies();
+            if (!list || list.length === 0) {
+                showToast('当前没有节点可复制', false);
+                return;
+            }
+            const startIdx = (currentPage - 1) * pageSize;
+            const endIdx = (pageSize >= 999999) ? list.length : Math.min(startIdx + pageSize, list.length);
+            const pageItems = (pageSize >= 999999) ? list : list.slice(startIdx, endIdx);
+            const text = pageItems.map(p => `${p.protocol}://${p.ip}:${p.port}`).join(String.fromCharCode(10));
+            copyText(text);
+            showToast(`已复制当前第 ${currentPage} 页的 ${pageItems.length} 个节点到剪贴板！`);
+        }
+
+        function setProtocolFilter(proto) {
+            currentFilter = proto;
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            if (!proto) {
+                document.getElementById('tab-all').classList.add('active');
+            } else if (proto === 'https') {
+                document.getElementById('tab-https').classList.add('active');
+            } else if (proto === 'socks5') {
+                document.getElementById('tab-socks5').classList.add('active');
+            } else if (proto === 'http') {
+                document.getElementById('tab-http').classList.add('active');
+            }
+            renderTable(true);
+        }
+
+        function handleSearch(val) {
+            currentSearch = val.trim();
+            renderTable(true);
+        }
+
+        function copyFilteredNodes() {
+            const list = getFilteredProxies();
+            if (!list || list.length === 0) {
+                showToast('当前筛选条件下没有节点可复制', false);
+                return;
+            }
+            const text = list.map(p => `${p.protocol}://${p.ip}:${p.port}`).join(String.fromCharCode(10));
+            copyText(text);
+            showToast(`已复制当前筛选的 ${list.length} 个节点到剪贴板！`);
+        }
+
+        function exportData(type) {
+            const list = getFilteredProxies();
+            let content = '';
+            let filename = `proxies_${currentFilter || 'all'}_${new Date().toISOString().slice(0, 10)}`;
+
+            if (type === 'txt') {
+                content = list.map(p => `${p.protocol}://${p.ip}:${p.port}`).join(String.fromCharCode(10));
+                filename += '.txt';
+            } else {
+                content = JSON.stringify(list, null, 2);
+                filename += '.json';
+            }
+
+            const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast(`已导出下载文件: ${filename} (共 ${list.length} 个节点)`);
+        }
+
+        function triggerImmediatePoll() {
+            const btn = document.getElementById('btn-trigger');
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> 触发中...';
+            fetch('/api/trigger')
+                .then(r => r.json())
+                .then(data => {
+                    showToast('已向后台发送采集探测请求，正在加速扫描！');
+                    setTimeout(loadData, 2000);
+                })
+                .catch(err => {
+                    showToast('触发失败: ' + err, false);
+                })
+                .finally(() => {
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.innerHTML = '<span>🔄</span> 立即采集检测';
+                    }, 4000);
+                });
+        }
+
+        function loadData() {
+            fetch('/api/proxies')
+                .then(r => r.json())
+                .then(data => {
+                    allProxies = data.proxies || [];
+                    const counts = data.protocol_counts || {};
+
+                    document.getElementById('stat-total').innerText = data.total || 0;
+                    document.getElementById('stat-https').innerText = counts.https || 0;
+                    document.getElementById('stat-socks5').innerText = counts.socks5 || 0;
+                    document.getElementById('stat-http').innerText = counts.http || 0;
+
+                    document.getElementById('badge-all').innerText = data.total || 0;
+                    document.getElementById('badge-https').innerText = counts.https || 0;
+                    document.getElementById('badge-socks5').innerText = counts.socks5 || 0;
+                    document.getElementById('badge-http').innerText = counts.http || 0;
+
+                    renderTable(false);
+                })
+                .catch(e => console.error('加载代理列表失败', e));
+
+            fetch('/api/stats')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.poll_round !== undefined) {
+                        document.getElementById('stat-round').innerText = `第 ${data.poll_round} 轮`;
+                    }
+                    if (data.last_poll_time) {
+                        document.getElementById('stat-last-time').innerText = `最近: ${data.last_poll_time}`;
+                    }
+                    if (data.poll_interval_sec) {
+                        pollIntervalSec = data.poll_interval_sec;
+                    }
+                    if (data.last_poll_timestamp) {
+                        lastPollTimestamp = data.last_poll_timestamp;
+                    }
+                    if (data.is_busy) {
+                        document.getElementById('service-status-text').innerText = '正在执行探测扫描...';
+                    } else {
+                        document.getElementById('service-status-text').innerText = '系统监控运行中';
+                    }
+                    updateCountdown();
+                })
+                .catch(e => console.error('加载状态统计失败', e));
+        }
+
+        // 初始化
+        initTheme();
+        initPageSize();
+        loadData();
+        setInterval(loadData, 15000);
+        setInterval(updateCountdown, 1000);
+    </script>
+</body>
+</html>

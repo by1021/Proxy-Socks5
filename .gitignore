@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# MindFS runtime
+.mindfs/
+
+# Backups and temporary files
+*.bak
+*.tmp
+*.log
+
+# Temporary migration/patch scripts
+apply_patch.py
+clean_db.py
+test_dedup.py
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Virtual environment
+venv/
+.venv/
+env/
