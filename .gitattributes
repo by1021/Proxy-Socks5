@@ -1,0 +1,9 @@
+# 自动化换行符规范
+* text=auto
+
+# 强制 Linux 脚本与容器配置文件始终保留 LF 换行符
+*.sh text eol=lf
+*.service text eol=lf
+Dockerfile text eol=lf
+docker-entrypoint.sh text eol=lf
+.dockerignore text eol=lf

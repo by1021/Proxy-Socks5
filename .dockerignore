@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.git/
+.gitignore
+.idea/
+.vscode/
+.mindfs/
+.venv/
+venv/
+*.db-wal
+*.db-shm
+*.log
+*.pid

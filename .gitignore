@@ -31,3 +31,7 @@ env/
 # Text files
 nodes.txt
 detail.txt
+
+# Linux runtime and Docker data
+*.pid
+data/

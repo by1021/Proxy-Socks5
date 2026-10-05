@@ -26,6 +26,7 @@ import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import bs4
 import sqlite3
+import signal
 
 # 适配 Windows 控制台 UTF-8 输出
 try:
@@ -58,7 +59,7 @@ DEFAULT_CONFIG = {
     "probe_workers": PROBE_WORKERS,
     "node_concurrency": NODE_CONCURRENCY,
     "target_url": TARGET_URL,
-    "db_file": DB_FILE
+    "db_file": "data.db"
 }
 
 def load_config() -> dict:
@@ -67,7 +68,7 @@ def load_config() -> dict:
     cfg = DEFAULT_CONFIG.copy()
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                 saved = json.load(f)
                 if isinstance(saved, dict):
                     cfg.update(saved)
@@ -77,8 +78,56 @@ def load_config() -> dict:
                     NODE_CONCURRENCY = int(cfg.get('node_concurrency', NODE_CONCURRENCY))
                     API_HOST = str(cfg.get('api_host', API_HOST))
                     API_PORT = int(cfg.get('api_port', API_PORT))
-                    DB_FILE = str(cfg.get('db_file', DB_FILE))
-            log(f"已加载配置文件 {CONFIG_FILE} (采集周期: {POLL_INTERVAL}s, 探测超时: {PROBE_TIMEOUT}s)")
+                    
+                    db_val = str(cfg.get('db_file', 'data.db')).strip()
+                    # 跨平台路径自适应：在非 Windows 环境检测到 Windows 绝对路径时自动回退为相对路径
+                    if os.name != 'nt' and re.match(r'^[a-zA-Z]:[\\/]', db_val):
+                        log(f"[跨平台兼容] 检测到 Windows 格式绝对路径 '{db_val}'，在 {sys.platform} 下自动回退为相对路径 'data.db'")
+                        db_val = "data.db"
+                    
+                    if not os.path.isabs(db_val):
+                        DB_FILE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), db_val))
+                    else:
+                        DB_FILE = db_val
+
+            # 环境变量覆盖 (支持云原生容器与 Linux 部署环境配置)
+            if os.getenv("PROXY_API_HOST"):
+                API_HOST = os.getenv("PROXY_API_HOST")
+            if os.getenv("PROXY_API_PORT"):
+                try:
+                    API_PORT = int(os.getenv("PROXY_API_PORT"))
+                except ValueError:
+                    pass
+            if os.getenv("PROXY_POLL_INTERVAL"):
+                try:
+                    POLL_INTERVAL = int(os.getenv("PROXY_POLL_INTERVAL"))
+                except ValueError:
+                    pass
+            if os.getenv("PROXY_PROBE_TIMEOUT"):
+                try:
+                    PROBE_TIMEOUT = float(os.getenv("PROXY_PROBE_TIMEOUT"))
+                except ValueError:
+                    pass
+            if os.getenv("PROXY_PROBE_WORKERS"):
+                try:
+                    PROBE_WORKERS = int(os.getenv("PROXY_PROBE_WORKERS"))
+                except ValueError:
+                    pass
+            if os.getenv("PROXY_NODE_CONCURRENCY"):
+                try:
+                    NODE_CONCURRENCY = int(os.getenv("PROXY_NODE_CONCURRENCY"))
+                except ValueError:
+                    pass
+            if os.getenv("PROXY_TARGET_URL"):
+                TARGET_URL = os.getenv("PROXY_TARGET_URL")
+            if os.getenv("PROXY_DB_FILE"):
+                env_db = os.getenv("PROXY_DB_FILE")
+                if not os.path.isabs(env_db):
+                    DB_FILE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), env_db))
+                else:
+                    DB_FILE = env_db
+
+            log(f"已加载配置文件 {CONFIG_FILE} (采集周期: {POLL_INTERVAL}s, 探测超时: {PROBE_TIMEOUT}s, 存储: {DB_FILE})")
         except Exception as e:
             log(f"读取配置文件异常，使用默认值: {e}")
     else:
@@ -93,7 +142,7 @@ def save_config(cfg: dict = None) -> bool:
         cfg = DEFAULT_CONFIG.copy()
         if os.path.exists(CONFIG_FILE):
             try:
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
                     saved = json.load(f)
                     if isinstance(saved, dict):
                         cfg.update(saved)
@@ -105,6 +154,8 @@ def save_config(cfg: dict = None) -> bool:
         cfg["node_concurrency"] = NODE_CONCURRENCY
         cfg["api_host"] = API_HOST
         cfg["api_port"] = API_PORT
+        if "db_file" not in cfg or (os.path.isabs(str(cfg.get("db_file", ""))) and os.path.basename(str(cfg.get("db_file", ""))) == "data.db"):
+            cfg["db_file"] = "data.db"
 
     with data_lock:
         try:
@@ -328,6 +379,12 @@ def unmask_and_verify(proto: str, masked_ip: str, port: int) -> str | None:
 # ==================== SQLite 本地数据库核心层 ====================
 def get_db():
     """获取配置了 WAL 模式与行字典的 SQLite 数据库连接"""
+    db_dir = os.path.dirname(os.path.abspath(DB_FILE))
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except Exception:
+            pass
     conn = sqlite3.connect(DB_FILE, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
@@ -1086,15 +1143,34 @@ def main():
     t = threading.Thread(target=monitor_loop, daemon=True)
     t.start()
 
-    # 独占端口检测与 Windows 绑定防护，防止多进程冲突并发写入文件
+    # 独占端口检测与 Linux/Windows 套接字端口复用配置
     if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
         ThreadingHTTPServer.allow_reuse_address = False
+    else:
+        ThreadingHTTPServer.allow_reuse_address = True
 
     try:
         server = ThreadingHTTPServer((API_HOST, API_PORT), ProxyHTTPHandler)
     except OSError as e:
         log(f"[启动失败] 端口 {API_PORT} 绑定失败 (可能有其他实例已在运行): {e}")
         sys.exit(1)
+
+    # 注册优雅停机信号 (支持 Linux SIGTERM / SIGINT，完美适配 Docker stop 与 systemd 停机)
+    stop_event = threading.Event()
+    def graceful_shutdown(signum=None, frame=None):
+        if not stop_event.is_set():
+            stop_event.set()
+            sig_name = "SIGTERM" if signum == getattr(signal, "SIGTERM", None) else ("SIGINT" if signum == signal.SIGINT else str(signum))
+            log(f"接收到停止信号 ({sig_name})，服务正在优雅退出...")
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        signal.signal(signal.SIGINT, graceful_shutdown)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, graceful_shutdown)
+    except Exception:
+        pass
+
     log(f"HTTP API 服务已就绪，正在监听: http://{API_HOST}:{API_PORT}")
     log(f"  [1] 全部纯节点接口:   http://localhost:{API_PORT}/nodes.txt")
     log(f"  [2] 专属 HTTPS 接口:  http://localhost:{API_PORT}/https.txt")
@@ -1103,14 +1179,17 @@ def main():
     log(f"  [5] 纯 IP:Port 接口:  http://localhost:{API_PORT}/nodes.txt?raw=1")
     log(f"  [6] 完整档案接口:     http://localhost:{API_PORT}/detail.txt")
     log(f"  [7] 状态统计接口:     http://localhost:{API_PORT}/api/stats")
-    log(f"  [8] 现代化仪表盘首页: http://localhost:{API_PORT}/")
+    log(f"  [8] 健康检查探针:     http://localhost:{API_PORT}/health")
+    log(f"  [9] 现代化仪表盘首页: http://localhost:{API_PORT}/")
     log("=" * 70)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        log("接收到中断信号，系统安全退出...")
-        server.shutdown()
+        graceful_shutdown()
+    finally:
+        server.server_close()
+        log("HTTP 服务与后台资源已清理完毕，进程安全退出。")
 
 if __name__ == '__main__':
     main()

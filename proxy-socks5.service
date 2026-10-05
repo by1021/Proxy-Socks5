@@ -1,0 +1,21 @@
+[Unit]
+Description=Proxy Socks5 Monitor & Distribution Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# 工作目录，请按实际部署绝对路径调整 (例如 /opt/proxy-socks5)
+WorkingDirectory=/opt/proxy-socks5
+ExecStart=/usr/bin/python3 /opt/proxy-socks5/proxy_service.py
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=10s
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
