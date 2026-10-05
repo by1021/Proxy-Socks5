@@ -4,7 +4,7 @@ __pycache__/
 *$py.class
 *.pyo
 
-# SQLite WAL and temporary files
+# SQLite WAL and database files
 *.db-wal
 *.db-shm
 *.db
@@ -16,13 +16,6 @@ __pycache__/
 *.bak
 *.tmp
 *.log
-
-# Temporary migration/patch/test scripts
-apply_patch.py
-clean_db.py
-test_dedup.py
-upgrade_to_sqlite.py
-check_sync.py
 
 # IDE / Editor
 .idea/

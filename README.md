@@ -42,7 +42,7 @@ proxy-socks5/
 ├── proxy_service.py   # 核心主服务（采集、探测还原、真实可用性校验、HTTP API、SQLite引擎）
 ├── dashboard.html     # 现代化 Glassmorphism 实时交互仪表盘前端
 ├── start.bat          # Windows 一键启动脚本
-├── proxies.db         # SQLite 本地数据库（权威存储，开启 WAL 高并发模式）
+├── data.db         # SQLite 本地数据库（权威存储，开启 WAL 高并发模式）
 ├── nodes.txt          # 纯代理节点文件（实时导出视图，每行一条: protocol://ip:port）
 ├── detail.txt         # 详细档案文件（实时导出视图，含时间、协议、IP、端口、地区、标签）
 ├── requirements.txt   # Python 依赖清单
