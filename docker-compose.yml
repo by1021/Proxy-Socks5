@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   proxy-socks5:
     build:
@@ -24,6 +22,8 @@ services:
     volumes:
       # 持久化存储 SQLite 数据（将保存在宿主机的 ./data 目录下）
       - ./data:/app/data
+      # 挂载仪表盘前端模板，支持热更新
+      - ./dashboard.html:/app/dashboard.html:ro
       # 如需自定义并持久化 config.json，取消下方注释
       # - ./config.json:/app/config.json
     healthcheck:

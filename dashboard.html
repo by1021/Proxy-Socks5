@@ -97,6 +97,10 @@
             --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.06);
         }
 
+        html {
+            -webkit-text-size-adjust: 100%;
+            -webkit-tap-highlight-color: transparent;
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; transition: background-color 0.25s ease, border-color 0.25s ease; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -104,8 +108,12 @@
             background-image: var(--bg-gradient);
             color: var(--text-main);
             min-height: 100vh;
-            padding: 30px 20px 60px;
+            padding: 30px 20px max(60px, calc(30px + env(safe-area-inset-bottom, 0px)));
             line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+        button, select, input, .stat-card, .host-cell, .action-icon-btn, .tab-btn {
+            touch-action: manipulation;
         }
         .container { max-width: 1200px; margin: 0 auto; }
 
@@ -808,6 +816,415 @@
         #toast.show { transform: translateY(0); opacity: 1; }
         .empty-state { padding: 40px 20px; text-align: center; color: var(--text-dim); }
         .empty-icon { font-size: 40px; margin-bottom: 10px; }
+
+        /* ================= 移动端 / 响应式适配优化 ================= */
+        @media (min-width: 641px) and (max-width: 992px) {
+            body {
+                padding: 20px 16px 40px;
+            }
+            .header {
+                padding: 20px;
+            }
+            .stats-grid {
+                grid-template-columns: repeat(3, 1fr);
+                gap: 12px;
+            }
+            .stat-card.monitor {
+                grid-column: span 2;
+            }
+            .action-buttons {
+                flex-wrap: wrap;
+            }
+        }
+
+        @media (max-width: 640px) {
+            body {
+                padding: 12px 10px max(30px, calc(16px + env(safe-area-inset-bottom, 0px)));
+            }
+
+            /* 顶部 Header 移动端自适应 */
+            .header {
+                padding: 14px 14px;
+                gap: 12px;
+                border-radius: 16px;
+                margin-bottom: 14px;
+            }
+            .brand-box {
+                gap: 10px;
+                width: 100%;
+            }
+            .brand-icon {
+                width: 40px;
+                height: 40px;
+                font-size: 20px;
+                border-radius: 12px;
+                flex-shrink: 0;
+            }
+            .brand-text h1 {
+                font-size: 17px;
+                flex-wrap: wrap;
+                gap: 6px;
+            }
+            .brand-subtitle {
+                font-size: 11px;
+                line-height: 1.35;
+                margin-top: 3px;
+                word-break: break-word;
+            }
+            .header-actions {
+                width: 100%;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+            }
+            .status-pill {
+                grid-column: span 2;
+                justify-content: center;
+                width: 100%;
+                padding: 7px 12px;
+                font-size: 12px;
+            }
+            .theme-toggle-btn, .header-actions .btn {
+                justify-content: center;
+                width: 100%;
+                padding: 9px 8px;
+                font-size: 12px;
+            }
+            #btn-trigger {
+                grid-column: span 2;
+                padding: 10px;
+            }
+
+            /* 统计卡片网格移动端优化 */
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+                margin-bottom: 14px;
+            }
+            .stat-card {
+                padding: 12px 12px;
+                border-radius: 14px;
+            }
+            .stat-head {
+                font-size: 12px;
+            }
+            .stat-value {
+                font-size: 22px;
+                margin: 6px 0 2px;
+            }
+            .stat-desc {
+                font-size: 11px;
+                line-height: 1.3;
+            }
+            .stat-card.monitor {
+                grid-column: span 2;
+            }
+            .stat-card.monitor .stat-value {
+                font-size: 16px;
+                margin-top: 4px;
+            }
+
+            /* 筛选与控制栏移动端优化 */
+            .control-bar {
+                padding: 12px 12px;
+                gap: 12px;
+                border-radius: 14px;
+                margin-bottom: 14px;
+            }
+            .filter-tabs {
+                width: 100%;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                scrollbar-width: none;
+                padding: 4px;
+                gap: 6px;
+            }
+            .filter-tabs::-webkit-scrollbar {
+                display: none;
+            }
+            .tab-btn {
+                flex-shrink: 0;
+                padding: 7px 12px;
+                font-size: 12px;
+            }
+            .search-box {
+                min-width: 100%;
+                max-width: 100%;
+                width: 100%;
+            }
+            .search-input {
+                padding: 9px 12px 9px 36px;
+                font-size: 13px;
+            }
+            .action-buttons {
+                width: 100%;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+            }
+            .action-buttons .btn {
+                width: 100%;
+                justify-content: center;
+                padding: 9px 6px;
+                font-size: 12px;
+            }
+
+            /* 表格移动端卡片化优雅排版 */
+            .table-card {
+                border-radius: 14px;
+                margin-bottom: 14px;
+            }
+            .table-responsive {
+                overflow-x: visible;
+            }
+            table, thead, tbody, th, td, tr {
+                display: block;
+                width: 100%;
+            }
+            thead {
+                display: none;
+            }
+            tbody tr {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                padding: 14px 14px;
+                border-bottom: 1px solid var(--table-border);
+            }
+            tbody tr:last-child {
+                border-bottom: none;
+            }
+            td {
+                padding: 0 !important;
+                white-space: normal !important;
+                border: none !important;
+                display: block;
+                width: 100%;
+            }
+            /* 协议 Badge */
+            td:nth-child(1) {
+                display: inline-flex;
+                align-items: center;
+            }
+            /* 真实节点地址高亮块 */
+            td:nth-child(2) {
+                margin: 2px 0;
+            }
+            td:nth-child(2) .host-cell {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                width: 100%;
+                padding: 9px 12px;
+                font-size: 14px;
+                border-radius: 8px;
+                background: rgba(56, 189, 248, 0.08);
+                border: 1px solid rgba(56, 189, 248, 0.22);
+            }
+            td:nth-child(2) .host-cell::after {
+                content: "点击复制 📋";
+                font-size: 11px;
+                color: var(--primary);
+                font-weight: 500;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                opacity: 0.85;
+            }
+            /* 归属国家/地区 */
+            td:nth-child(3) {
+                font-size: 12px;
+                color: var(--text-muted);
+                display: flex;
+                align-items: center;
+            }
+            /* 属性标签 */
+            td:nth-child(4) {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+            }
+            /* 入库时间 */
+            td:nth-child(5) {
+                font-size: 11px;
+                color: var(--text-dim);
+                display: flex;
+                align-items: center;
+            }
+            td:nth-child(5)::before {
+                content: "发现时间：";
+                color: var(--text-dim);
+            }
+            /* 快捷操作按钮行 */
+            td:nth-child(6) {
+                display: grid !important;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+                padding-top: 8px !important;
+                margin-top: 2px;
+                border-top: 1px dashed var(--card-border) !important;
+                text-align: center !important;
+            }
+            td:nth-child(6) .action-icon-btn {
+                width: 100%;
+                padding: 8px 10px;
+                font-size: 12px;
+                font-weight: 600;
+                border-radius: 8px;
+                justify-content: center;
+            }
+            /* 表格空数据样式修正 */
+            tbody tr td.empty-state {
+                display: block !important;
+                padding: 36px 14px !important;
+                text-align: center !important;
+            }
+
+            /* 分页栏移动端优化 */
+            .pagination-bar {
+                padding: 12px 14px;
+                flex-direction: column;
+                align-items: stretch;
+                gap: 10px;
+            }
+            .pagination-info {
+                justify-content: space-between;
+                font-size: 12px;
+                width: 100%;
+            }
+            .pagination-controls {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 10px;
+                width: 100%;
+            }
+            .page-size-selector {
+                justify-content: space-between;
+                width: 100%;
+            }
+            .page-size-selector .page-select {
+                flex: 1;
+                padding: 6px 10px;
+            }
+            .pagination-buttons {
+                display: flex;
+                justify-content: space-between;
+                width: 100%;
+                gap: 4px;
+            }
+            .pagination-buttons .page-btn {
+                flex: 1;
+                height: 36px;
+                padding: 0 4px;
+                font-size: 12px;
+            }
+            .page-numbers {
+                display: none !important;
+            }
+            .page-jump {
+                display: flex;
+                justify-content: center;
+                width: 100%;
+                gap: 8px;
+            }
+            .page-jump .jump-input {
+                width: 60px;
+                height: 36px;
+                font-size: 13px;
+            }
+            .page-jump .jump-btn {
+                height: 36px;
+                padding: 0 16px;
+            }
+
+            /* API 订阅卡片网格移动端优化 */
+            .api-card {
+                padding: 16px 14px;
+                border-radius: 14px;
+                margin-bottom: 16px;
+            }
+            .api-head {
+                font-size: 15px;
+                margin-bottom: 12px;
+                padding-bottom: 10px;
+            }
+            .api-grid {
+                grid-template-columns: 1fr;
+                gap: 12px;
+            }
+            .api-item {
+                padding: 12px 12px;
+            }
+            .api-url {
+                font-size: 11px;
+                padding: 6px 8px;
+                gap: 6px;
+            }
+
+            /* 参数设置 Modal 移动端优化 */
+            .modal-overlay {
+                padding: 12px;
+            }
+            .modal-box {
+                padding: 20px 16px;
+                border-radius: 16px;
+                max-height: 88vh;
+                overflow-y: auto;
+            }
+            .modal-title {
+                font-size: 16px;
+            }
+            .preset-pills {
+                gap: 6px;
+            }
+            .preset-pill {
+                padding: 5px 8px;
+                font-size: 11px;
+            }
+            .modal-footer {
+                flex-direction: column-reverse;
+                gap: 8px;
+            }
+            .modal-footer .btn {
+                width: 100%;
+                justify-content: center;
+                padding: 10px 14px;
+            }
+
+            /* Toast 提示居中悬浮优化 */
+            #toast {
+                bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+                left: 50%;
+                right: auto;
+                transform: translate(-50%, 80px);
+                width: max-content;
+                max-width: calc(100vw - 28px);
+                box-sizing: border-box;
+                justify-content: center;
+                padding: 10px 18px;
+                font-size: 12px;
+            }
+            #toast.show {
+                transform: translate(-50%, 0);
+            }
+        }
+
+        /* 针对极窄屏幕（≤ 360px 如 iPhone SE/Mini）细微补丁 */
+        @media (max-width: 360px) {
+            .brand-text h1 {
+                font-size: 15px;
+            }
+            .ver-badge {
+                font-size: 10px;
+            }
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            .stat-card.monitor {
+                grid-column: span 1;
+            }
+            .action-buttons {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
