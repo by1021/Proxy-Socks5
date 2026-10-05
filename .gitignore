@@ -27,3 +27,7 @@ __pycache__/
 venv/
 .venv/
 env/
+
+# Text files
+nodes.txt
+detail.txt

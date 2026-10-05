@@ -6,7 +6,5 @@
   "probe_workers": 96,
   "node_concurrency": 5,
   "target_url": "https://proxy-socks5.com/proxy_list",
-  "nodes_file": "nodes.txt",
-  "detail_file": "detail.txt",
   "db_file": "C:\\Users\\Administrator\\Desktop\\myvibe\\proxy-socks5\\data.db"
 }

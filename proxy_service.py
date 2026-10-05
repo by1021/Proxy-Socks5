@@ -39,8 +39,6 @@ except Exception:
 # ==================== 核心配置 ====================
 API_HOST = "0.0.0.0"                 # 监听地址 (0.0.0.0 允许局域网或公网访问)
 API_PORT = 8899                      # API 与仪表盘服务端口
-NODES_FILE = "nodes.txt"             # 纯节点存储文件
-DETAIL_FILE = "detail.txt"           # 详细信息档案文件
 DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")  # SQLite 本地数据库文件
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
 TARGET_URL = "https://proxy-socks5.com/proxy_list"
@@ -60,8 +58,6 @@ DEFAULT_CONFIG = {
     "probe_workers": PROBE_WORKERS,
     "node_concurrency": NODE_CONCURRENCY,
     "target_url": TARGET_URL,
-    "nodes_file": NODES_FILE,
-    "detail_file": DETAIL_FILE,
     "db_file": DB_FILE
 }
 
@@ -365,10 +361,10 @@ def init_db():
         # 检查是否需要从现有 detail.txt 自动迁移历史数据
         cursor = conn.execute("SELECT COUNT(*) AS cnt FROM proxies;")
         cnt = cursor.fetchone()['cnt']
-        if cnt == 0 and os.path.exists(DETAIL_FILE):
-            log(f"首次初始化 SQLite 数据库，正在从 {DETAIL_FILE} 自动迁移历史合法节点...")
+        if cnt == 0 and os.path.exists("detail.txt"):
+            log(f"首次初始化 SQLite 数据库，正在从 detail.txt 自动迁移历史合法节点...")
             migrated = 0
-            with open(DETAIL_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+            with open("detail.txt", 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
                     line = line.strip()
                     if not line or 'X' in line or 'x' in line:
@@ -392,22 +388,8 @@ def init_db():
             log(f"历史数据迁移完成，共成功收录 {migrated} 个唯一合法节点至 {DB_FILE}")
 
 def sync_disk_files_from_db(conn=None):
-    """将数据库中当前全部合法节点同步导出至 nodes.txt 与 detail.txt，保障外部文本订阅与下游工具 100% 兼容"""
-    need_close = False
-    if conn is None:
-        conn = get_db()
-        need_close = True
-    try:
-        rows = conn.execute("SELECT protocol, ip, port, location, tags, entry_time FROM proxies ORDER BY id ASC;").fetchall()
-        with open(NODES_FILE, 'w', encoding='utf-8') as fn, \
-             open(DETAIL_FILE, 'w', encoding='utf-8') as fd:
-            for r in rows:
-                proto_url = f"{r['protocol']}://{r['ip']}:{r['port']}"
-                fn.write(f"{proto_url}\n")
-                fd.write(f"[{r['entry_time']}] | {proto_url} | 地区: {r['location']} | 属性: {r['tags']}\n")
-    finally:
-        if need_close:
-            conn.close()
+    """（已废弃磁盘文件导出，直接由 SQLite 数据库对外提供实时订阅查询）"""
+    pass
 
 def read_all_proxies_from_disk():
     """从 SQLite 数据库高效读取结构化代理列表与协议统计"""
@@ -590,17 +572,6 @@ def save_single_node(node: dict) -> bool:
         except Exception as e:
             log(f"[数据库写入异常] {e}")
             return False
-
-        # 4. 同步流式追加至 nodes.txt 与 detail.txt，保证外部文本订阅的绝对实时性与兼容性
-        try:
-            with open(NODES_FILE, 'a', encoding='utf-8') as f_nodes, \
-                 open(DETAIL_FILE, 'a', encoding='utf-8') as f_detail:
-                f_nodes.write(f"{fp_proto}\n")
-                f_nodes.flush()
-                f_detail.write(f"[{entry_time}] | {fp_proto} | 地区: {location} | 属性: {tags}\n")
-                f_detail.flush()
-        except Exception as e:
-            log(f"[文件同步异常] {e}")
 
         seen_fingerprints.add(fp_proto)
         seen_fingerprints.add(fp_raw)
@@ -834,32 +805,19 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
             self.end_headers()
 
-            with data_lock:
-                if os.path.exists(NODES_FILE):
-                    with open(NODES_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-                        lines = [l.strip() for l in f if l.strip() and 'X' not in l and 'x' not in l]
-                else:
-                    lines = []
-
+            proxies_list, _ = read_all_proxies_from_disk()
             out = []
             seen_out = set()
-            for line in lines:
-                m = re.match(r'^(?:(socks5|https?)://)?([^/:]+:\d+)', line)
-                if m:
-                    line_proto = (m.group(1) or 'socks5').lower()
-                    host_port = m.group(2)
-                    if proto_filter and line_proto != proto_filter:
-                        continue
-                    key = host_port if raw_mode else f"{line_proto}://{host_port}"
-                    if key in seen_out:
-                        continue
-                    seen_out.add(key)
-                    out.append(key)
-                else:
-                    if not proto_filter and line not in seen_out:
-                        seen_out.add(line)
-                        out.append(line)
-
+            for p in proxies_list:
+                line_proto = p["protocol"].lower()
+                if proto_filter and line_proto != proto_filter:
+                    continue
+                endpoint = f"{p['ip']}:{p['port']}"
+                key = endpoint if raw_mode else f"{line_proto}://{endpoint}"
+                if key in seen_out:
+                    continue
+                seen_out.add(key)
+                out.append(key)
             self.wfile.write('\n'.join(out).encode('utf-8'))
 
         # 2. 详细元数据档案接口 (/detail.txt 或 /proxies_detail.txt)
