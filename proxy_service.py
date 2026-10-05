@@ -25,6 +25,7 @@ import urllib.request
 import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import bs4
+import sqlite3
 
 # 适配 Windows 控制台 UTF-8 输出
 try:
@@ -40,6 +41,7 @@ API_HOST = "0.0.0.0"                 # 监听地址 (0.0.0.0 允许局域网或�
 API_PORT = 8899                      # API 与仪表盘服务端口
 NODES_FILE = "nodes.txt"             # 纯节点存储文件
 DETAIL_FILE = "detail.txt"           # 详细信息档案文件
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxies.db")  # SQLite 本地数据库文件
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
 TARGET_URL = "https://proxy-socks5.com/proxy_list"
 POLL_INTERVAL = 60                   # 轮询采集周期 (秒)
@@ -59,12 +61,13 @@ DEFAULT_CONFIG = {
     "node_concurrency": NODE_CONCURRENCY,
     "target_url": TARGET_URL,
     "nodes_file": NODES_FILE,
-    "detail_file": DETAIL_FILE
+    "detail_file": DETAIL_FILE,
+    "db_file": DB_FILE
 }
 
 def load_config() -> dict:
     """从 config.json 加载持久化配置，若不存在则使用预设默认值并自动创建"""
-    global POLL_INTERVAL, PROBE_TIMEOUT, PROBE_WORKERS, NODE_CONCURRENCY, API_HOST, API_PORT
+    global POLL_INTERVAL, PROBE_TIMEOUT, PROBE_WORKERS, NODE_CONCURRENCY, API_HOST, API_PORT, DB_FILE
     cfg = DEFAULT_CONFIG.copy()
     if os.path.exists(CONFIG_FILE):
         try:
@@ -78,6 +81,7 @@ def load_config() -> dict:
                     NODE_CONCURRENCY = int(cfg.get('node_concurrency', NODE_CONCURRENCY))
                     API_HOST = str(cfg.get('api_host', API_HOST))
                     API_PORT = int(cfg.get('api_port', API_PORT))
+                    DB_FILE = str(cfg.get('db_file', DB_FILE))
             log(f"已加载配置文件 {CONFIG_FILE} (采集周期: {POLL_INTERVAL}s, 探测超时: {PROBE_TIMEOUT}s)")
         except Exception as e:
             log(f"读取配置文件异常，使用默认值: {e}")
@@ -88,7 +92,7 @@ def load_config() -> dict:
 
 def save_config(cfg: dict = None) -> bool:
     """将当前内存配置持久化写入 config.json 文件"""
-    global POLL_INTERVAL, PROBE_TIMEOUT, PROBE_WORKERS, NODE_CONCURRENCY, API_HOST, API_PORT
+    global POLL_INTERVAL, PROBE_TIMEOUT, PROBE_WORKERS, NODE_CONCURRENCY, API_HOST, API_PORT, DB_FILE
     if cfg is None:
         cfg = DEFAULT_CONFIG.copy()
         if os.path.exists(CONFIG_FILE):
@@ -324,166 +328,147 @@ def unmask_and_verify(proto: str, masked_ip: str, port: int) -> str | None:
             return masked_ip
         return None
 
+
+# ==================== SQLite 本地数据库核心层 ====================
+def get_db():
+    """获取配置了 WAL 模式与行字典的 SQLite 数据库连接"""
+    conn = sqlite3.connect(DB_FILE, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    return conn
+
+def init_db():
+    """初始化数据库表与索引，若为空则自动无缝迁移 detail.txt / nodes.txt 历史合法数据"""
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS proxies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                protocol TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                location TEXT DEFAULT '',
+                tags TEXT DEFAULT '',
+                entry_time TEXT NOT NULL,
+                last_check_time TEXT DEFAULT '',
+                status TEXT DEFAULT 'active',
+                latency_ms REAL DEFAULT 0.0,
+                fail_count INTEGER DEFAULT 0,
+                UNIQUE(ip, port)
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_proto ON proxies(protocol);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_time ON proxies(entry_time DESC);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_status ON proxies(status);")
+
+        # 检查是否需要从现有 detail.txt 自动迁移历史数据
+        cursor = conn.execute("SELECT COUNT(*) AS cnt FROM proxies;")
+        cnt = cursor.fetchone()['cnt']
+        if cnt == 0 and os.path.exists(DETAIL_FILE):
+            log(f"首次初始化 SQLite 数据库，正在从 {DETAIL_FILE} 自动迁移历史合法节点...")
+            migrated = 0
+            with open(DETAIL_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or 'X' in line or 'x' in line:
+                        continue
+                    m = re.match(r'\[(.*?)\]\s*\|\s*(socks5|https?)://([^:]+):(\d+)\s*\|\s*地区:\s*(.*?)\s*\|\s*属性:\s*(.*)', line)
+                    if m:
+                        e_time, proto, ip, port_str, loc, tags = m.groups()
+                        proto = proto.lower()
+                        if is_valid_ipv4(ip):
+                            try:
+                                port = int(port_str)
+                                conn.execute("""
+                                    INSERT OR IGNORE INTO proxies 
+                                    (protocol, ip, port, location, tags, entry_time, last_check_time, status)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active');
+                                """, (proto, ip, port, loc, tags, e_time, e_time))
+                                migrated += 1
+                            except ValueError:
+                                continue
+            conn.commit()
+            log(f"历史数据迁移完成，共成功收录 {migrated} 个唯一合法节点至 {DB_FILE}")
+
+def sync_disk_files_from_db(conn=None):
+    """将数据库中当前全部合法节点同步导出至 nodes.txt 与 detail.txt，保障外部文本订阅与下游工具 100% 兼容"""
+    need_close = False
+    if conn is None:
+        conn = get_db()
+        need_close = True
+    try:
+        rows = conn.execute("SELECT protocol, ip, port, location, tags, entry_time FROM proxies ORDER BY id ASC;").fetchall()
+        with open(NODES_FILE, 'w', encoding='utf-8') as fn, \
+             open(DETAIL_FILE, 'w', encoding='utf-8') as fd:
+            for r in rows:
+                proto_url = f"{r['protocol']}://{r['ip']}:{r['port']}"
+                fn.write(f"{proto_url}\n")
+                fd.write(f"[{r['entry_time']}] | {proto_url} | 地区: {r['location']} | 属性: {r['tags']}\n")
+    finally:
+        if need_close:
+            conn.close()
+
 def read_all_proxies_from_disk():
-    """从 detail.txt 读取并结构化解析全部真实节点 (严格保证内存唯一性与质量)"""
+    """从 SQLite 数据库高效读取结构化代理列表与协议统计"""
     proxies_list = []
     counts = {"total": 0, "socks5": 0, "http": 0, "https": 0}
-    seen_endpoints = set()
 
-    with data_lock:
-        if os.path.exists(DETAIL_FILE):
-            with open(DETAIL_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-                for l in f:
-                    l = l.strip()
-                    if not l or 'X' in l or 'x' in l:
-                        continue
-                    m = re.match(r'\[(.*?)\]\s*\|\s*(socks5|https?)://([^:]+):(\d+)\s*\|\s*地区:\s*(.*?)\s*\|\s*属性:\s*(.*)', l)
-                    if m:
-                        proto = m.group(2).lower()
-                        ip = m.group(3)
-                        port = int(m.group(4))
-                        endpoint = f"{ip}:{port}"
-                        proto_endpoint = f"{proto}://{ip}:{port}"
-                        if endpoint in seen_endpoints or proto_endpoint in seen_endpoints:
-                            continue
-                        if is_valid_ipv4(ip):
-                            seen_endpoints.add(endpoint)
-                            seen_endpoints.add(proto_endpoint)
-                            item = {
-                                "entry_time": m.group(1),
-                                "protocol": proto,
-                                "ip": ip,
-                                "port": port,
-                                "url": proto_endpoint,
-                                "location": m.group(5),
-                                "tags": m.group(6)
-                            }
-                            proxies_list.append(item)
-                            counts["total"] += 1
-                            if proto in counts:
-                                counts[proto] += 1
-                            else:
-                                counts[proto] = 1
+    try:
+        with get_db() as conn:
+            cur = conn.execute("SELECT protocol, COUNT(*) as cnt FROM proxies GROUP BY protocol;")
+            for r in cur.fetchall():
+                p = r['protocol'].lower()
+                c = r['cnt']
+                counts[p] = c
+                counts['total'] += c
+
+            rows = conn.execute("SELECT entry_time, protocol, ip, port, location, tags, status, latency_ms FROM proxies ORDER BY entry_time DESC;").fetchall()
+            for r in rows:
+                proto = r['protocol'].lower()
+                ip = r['ip']
+                port = r['port']
+                proxies_list.append({
+                    "entry_time": r['entry_time'],
+                    "protocol": proto,
+                    "ip": ip,
+                    "port": port,
+                    "url": f"{proto}://{ip}:{port}",
+                    "location": r['location'],
+                    "tags": r['tags'],
+                    "status": r['status'],
+                    "latency_ms": r['latency_ms']
+                })
+    except Exception as e:
+        log(f"[数据库读取异常] {e}")
 
     return proxies_list, counts
 
 def init_dedup_cache(force_sync_files: bool = True):
     """
     启动与运行时全量自检去重门禁：
-    1. 彻底过滤并清除 NODES_FILE 和 DETAIL_FILE 中的带 X 掩码节点、非法 IPv4 及一切重复条目
-    2. 合并补充标签并保持 detail.txt 与 nodes.txt 绝对行行对应与唯一性
-    3. 全量刷新 seen_fingerprints 去重指纹库 (proto://ip:port 与 ip:port)
+    1. 确保 SQLite 数据库结构完整并载入全量节点
+    2. 全量刷新 seen_fingerprints 去重指纹库 (proto://ip:port 与 ip:port)
+    3. 同步导出 nodes.txt 与 detail.txt，保持磁盘文件 100% 对应与唯一
     """
     global seen_fingerprints
+    init_db()
     with data_lock:
         seen_fingerprints.clear()
-        parsed_records = []
-        seen_keys = set()
-        removed_dups = 0
-        removed_invalid = 0
+        with get_db() as conn:
+            rows = conn.execute("SELECT protocol, ip, port FROM proxies ORDER BY id ASC;").fetchall()
+            for r in rows:
+                p, ip, port = r['protocol'].lower(), r['ip'], r['port']
+                seen_fingerprints.add(f"{p}://{ip}:{port}")
+                seen_fingerprints.add(f"{ip}:{port}")
 
-        # 优先以 DETAIL_FILE 为权威元数据源进行解析与深度去重
-        if os.path.exists(DETAIL_FILE):
-            with open(DETAIL_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if 'X' in line or 'x' in line:
-                        removed_invalid += 1
-                        continue
-                    m = re.match(r'\[(.*?)\]\s*\|\s*(socks5|https?)://([^:]+):(\d+)\s*\|\s*地区:\s*(.*?)\s*\|\s*属性:\s*(.*)', line)
-                    if m:
-                        entry_time, proto, ip, port_str, loc, tags = m.groups()
-                        proto = proto.lower()
-                        if not is_valid_ipv4(ip):
-                            removed_invalid += 1
-                            continue
-                        try:
-                            port = int(port_str)
-                            if not (1 <= port <= 65535):
-                                removed_invalid += 1
-                                continue
-                        except ValueError:
-                            removed_invalid += 1
-                            continue
+            if force_sync_files:
+                sync_disk_files_from_db(conn)
 
-                        endpoint = f"{ip}:{port}"
-                        proto_endpoint = f"{proto}://{ip}:{port}"
-
-                        if endpoint in seen_keys or proto_endpoint in seen_keys:
-                            removed_dups += 1
-                            for rec in parsed_records:
-                                if rec['endpoint'] == endpoint or rec['proto_endpoint'] == proto_endpoint:
-                                    old_tags = rec['tags'].split()
-                                    new_tags = tags.split()
-                                    rec['tags'] = " ".join(dict.fromkeys(old_tags + new_tags))
-                                    if len(loc) > len(rec['location']):
-                                        rec['location'] = loc
-                                    break
-                            continue
-
-                        seen_keys.add(endpoint)
-                        seen_keys.add(proto_endpoint)
-                        seen_fingerprints.add(endpoint)
-                        seen_fingerprints.add(proto_endpoint)
-                        parsed_records.append({
-                            "entry_time": entry_time,
-                            "protocol": proto,
-                            "ip": ip,
-                            "port": port,
-                            "location": loc,
-                            "tags": tags,
-                            "endpoint": endpoint,
-                            "proto_endpoint": proto_endpoint
-                        })
-                    else:
-                        removed_invalid += 1
-
-        # 若 NODES_FILE 中有但 DETAIL_FILE 中遗漏的合法节点，进行安全同步
-        if os.path.exists(NODES_FILE):
-            with open(NODES_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or 'X' in line or 'x' in line:
-                        continue
-                    match = re.search(r'^(?:(socks5|https?)://)?([^/:]+):(\d+)', line)
-                    if match:
-                        proto = (match.group(1) or 'socks5').lower()
-                        ip, port_str = match.group(2), match.group(3)
-                        if is_valid_ipv4(ip):
-                            try:
-                                port = int(port_str)
-                            except ValueError:
-                                continue
-                            endpoint = f"{ip}:{port}"
-                            proto_endpoint = f"{proto}://{ip}:{port}"
-                            if endpoint not in seen_keys and proto_endpoint not in seen_keys:
-                                seen_keys.add(endpoint)
-                                seen_keys.add(proto_endpoint)
-                                seen_fingerprints.add(endpoint)
-                                seen_fingerprints.add(proto_endpoint)
-                                parsed_records.append({
-                                    "entry_time": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                    "protocol": proto,
-                                    "ip": ip,
-                                    "port": port,
-                                    "location": "未标注归属地",
-                                    "tags": "[机房]",
-                                    "endpoint": endpoint,
-                                    "proto_endpoint": proto_endpoint
-                                })
-
-        if force_sync_files:
-            with open(NODES_FILE, 'w', encoding='utf-8') as f_nodes, \
-                 open(DETAIL_FILE, 'w', encoding='utf-8') as f_detail:
-                for rec in parsed_records:
-                    f_nodes.write(f"{rec['proto_endpoint']}\n")
-                    f_detail.write(f"[{rec['entry_time']}] | {rec['proto_endpoint']} | 地区: {rec['location']} | 属性: {rec['tags']}\n")
-
-        service_stats["total_captured"] = len(parsed_records)
-        log(f"历史数据初始化与去重质检完成：清理重复节点 {removed_dups} 个，剔除无效/带X节点 {removed_invalid} 个，当前保留合法唯一节点: {len(parsed_records)} 个")
-        return len(parsed_records), removed_dups, removed_invalid
+            service_stats["total_captured"] = len(rows)
+            log(f"[本地数据库就绪] 已加载 {len(rows)} 个唯一合法有效节点 (存储文件: {DB_FILE})")
+            return len(rows), 0, 0
+# ==============================================================
 
 def fetch_latest_proxies():
     """从目标网站抓取最新展示的代理列表元数据 (覆盖 SOCKS5 / HTTP / HTTPS 全协议)"""
@@ -555,10 +540,10 @@ def fetch_latest_proxies():
 
 def save_single_node(node: dict) -> bool:
     """
-    流式安全落盘单个已验证节点
+    流式安全落盘单个已验证节点至 SQLite 本地数据库及兼容文本文件
     【核心门禁】：
     1. 严格禁止任何包含 X 或非合规 IPv4 写入！
-    2. 严格执行重复节点检测（内存指纹库 + 磁盘实体双重拦截），绝对禁止写入重复的节点信息！
+    2. 严格执行重复节点检测（引擎级 UNIQUE 约束 + 内存指纹库拦截），绝不写入重复信息！
     """
     ip = str(node.get('ip', '')).strip()
     try:
@@ -578,42 +563,50 @@ def save_single_node(node: dict) -> bool:
     fp_raw = f"{ip}:{port}"
 
     with data_lock:
-        # 2. 内存指纹库拦截：检测到重复节点信息直接拒绝
+        # 2. 内存指纹库预拦截
         if fp_proto in seen_fingerprints or fp_raw in seen_fingerprints:
-            log(f"[去重拦截] 检测到重复节点信息，拒绝重复写入: {fp_proto}")
+            log(f"[去重拦截] 检测到重复节点信息，拒绝写入: {fp_proto}")
             return False
 
-        # 3. 磁盘实体双重核验（防止外部写入或多进程并发落盘产生的偶发重复）
-        if os.path.exists(NODES_FILE):
-            try:
-                with open(NODES_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line == fp_proto or line == fp_raw or line.endswith(f"://{fp_raw}"):
-                            seen_fingerprints.add(fp_proto)
-                            seen_fingerprints.add(fp_raw)
-                            log(f"[磁盘去重拦截] 磁盘文件已存在该节点，拒绝重复追加: {fp_proto}")
-                            return False
-            except Exception as e:
-                log(f"[磁盘核验提示] 读取检查异常: {e}")
-
-        # 4. 通过全部去重检测，安全原子落盘
+        # 3. 数据库引擎级原子落盘与唯一性约束保证 (UNIQUE(ip, port))
         entry_time = node.get('entry_time') or datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         location = node.get('location') or '未知地区'
         tags = node.get('tags') or '[机房]'
 
-        with open(NODES_FILE, 'a', encoding='utf-8') as f_nodes, \
-             open(DETAIL_FILE, 'a', encoding='utf-8') as f_detail:
-            f_nodes.write(f"{fp_proto}\n")
-            f_nodes.flush()
-            f_detail.write(f"[{entry_time}] | {fp_proto} | 地区: {location} | 属性: {tags}\n")
-            f_detail.flush()
+        try:
+            with get_db() as conn:
+                cur = conn.execute("""
+                    INSERT OR IGNORE INTO proxies 
+                    (protocol, ip, port, location, tags, entry_time, last_check_time, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active');
+                """, (protocol, ip, port, location, tags, entry_time, entry_time))
+                conn.commit()
+
+                if cur.rowcount <= 0:
+                    seen_fingerprints.add(fp_proto)
+                    seen_fingerprints.add(fp_raw)
+                    log(f"[数据库去重拦截] 节点已存在于 SQLite 数据库，拒绝重复写入: {fp_proto}")
+                    return False
+        except Exception as e:
+            log(f"[数据库写入异常] {e}")
+            return False
+
+        # 4. 同步流式追加至 nodes.txt 与 detail.txt，保证外部文本订阅的绝对实时性与兼容性
+        try:
+            with open(NODES_FILE, 'a', encoding='utf-8') as f_nodes, \
+                 open(DETAIL_FILE, 'a', encoding='utf-8') as f_detail:
+                f_nodes.write(f"{fp_proto}\n")
+                f_nodes.flush()
+                f_detail.write(f"[{entry_time}] | {fp_proto} | 地区: {location} | 属性: {tags}\n")
+                f_detail.flush()
+        except Exception as e:
+            log(f"[文件同步异常] {e}")
 
         seen_fingerprints.add(fp_proto)
         seen_fingerprints.add(fp_raw)
         service_stats["total_captured"] += 1
 
-    log(f"[+ 成功收录] {fp_proto} | 地区: {location} | 属性: {tags} | 库中总数: {service_stats['total_captured']}")
+    log(f"[+ 成功收录入库] {fp_proto} | 地区: {location} | 属性: {tags} | 库中总数: {service_stats['total_captured']}")
     return True
 
 def process_node(node: dict):
@@ -951,10 +944,10 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
             }
             self.wfile.write(json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
 
-        # 4. JSON 格式代理列表 (/api/proxies)
+        # 4. JSON 格式代理列表 (/api/proxies - 基于 SQLite 高性能检索与分页)
         elif path == '/api/proxies':
             proto_filter = params.get('type', params.get('proto', ['']))[0].lower()
-            keyword = params.get('search', [''])[0].strip().lower()
+            keyword = params.get('search', [''])[0].strip()
             limit_str = params.get('limit', ['0'])[0]
             limit = int(limit_str) if limit_str.isdigit() else 0
             page_str = params.get('page', ['0'])[0]
@@ -968,32 +961,60 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
             self.end_headers()
 
-            proxies_list, counts = read_all_proxies_from_disk()
+            with get_db() as conn:
+                cur = conn.execute("SELECT protocol, COUNT(*) as cnt FROM proxies GROUP BY protocol;")
+                counts = {"total": 0, "socks5": 0, "http": 0, "https": 0}
+                for r in cur.fetchall():
+                    p = r['protocol'].lower()
+                    c = r['cnt']
+                    counts[p] = c
+                    counts['total'] += c
 
-            filtered = []
-            for p in proxies_list:
-                if proto_filter and p['protocol'] != proto_filter:
-                    continue
+                where_clauses = []
+                params_list = []
+                if proto_filter:
+                    where_clauses.append("protocol = ?")
+                    params_list.append(proto_filter)
                 if keyword:
-                    combined = f"{p['protocol']} {p['ip']} {p['port']} {p['location']} {p['tags']}".lower()
-                    if keyword not in combined:
-                        continue
-                filtered.append(p)
+                    where_clauses.append("(protocol LIKE ? OR ip LIKE ? OR CAST(port AS TEXT) LIKE ? OR location LIKE ? OR tags LIKE ?)")
+                    kw_arg = f"%{keyword}%"
+                    params_list.extend([kw_arg, kw_arg, kw_arg, kw_arg, kw_arg])
 
-            filtered.sort(key=lambda x: x.get('entry_time', ''), reverse=True)
-            total_filtered = len(filtered)
+                where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-            if page > 0 and page_size > 0:
-                start = (page - 1) * page_size
-                end = start + page_size
-                proxies_out = filtered[start:end]
-                total_pages = (total_filtered + page_size - 1) // page_size if page_size > 0 else 1
-            elif limit > 0:
-                proxies_out = filtered[:limit]
-                total_pages = 1
-            else:
-                proxies_out = filtered
-                total_pages = 1
+                total_filtered = conn.execute(f"SELECT COUNT(*) as cnt FROM proxies {where_sql};", params_list).fetchone()['cnt']
+
+                limit_clause = ""
+                query_params = list(params_list)
+                if page > 0 and page_size > 0:
+                    limit_clause = "LIMIT ? OFFSET ?"
+                    query_params.extend([page_size, (page - 1) * page_size])
+                    total_pages = (total_filtered + page_size - 1) // page_size
+                elif limit > 0:
+                    limit_clause = "LIMIT ?"
+                    query_params.append(limit)
+                    total_pages = 1
+                else:
+                    total_pages = 1
+
+                rows = conn.execute(f"SELECT entry_time, protocol, ip, port, location, tags, status, latency_ms FROM proxies {where_sql} ORDER BY entry_time DESC {limit_clause};", query_params).fetchall()
+
+                proxies_out = []
+                for r in rows:
+                    proto = r['protocol'].lower()
+                    ip = r['ip']
+                    port = r['port']
+                    proxies_out.append({
+                        "entry_time": r['entry_time'],
+                        "protocol": proto,
+                        "ip": ip,
+                        "port": port,
+                        "url": f"{proto}://{ip}:{port}",
+                        "location": r['location'],
+                        "tags": r['tags'],
+                        "status": r['status'],
+                        "latency_ms": r['latency_ms']
+                    })
 
             res = {
                 "total": counts["total"],
