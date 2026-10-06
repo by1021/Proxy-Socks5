@@ -1241,12 +1241,6 @@
                 <button class="theme-toggle-btn" id="theme-btn" onclick="toggleTheme()" title="切换白天/黑夜模式">
                     <span id="theme-icon">☀️</span> <span id="theme-text">浅色模式</span>
                 </button>
-                <button class="btn btn-secondary" onclick="openImportModal()" title="批量导入外部代理节点">
-                    <span>📤</span> 批量导入
-                </button>
-                <button class="btn btn-secondary" onclick="openExportModal()" title="全量与条件数据导出 / 数据库备份">
-                    <span>📥</span> 数据导出
-                </button>
                 <button class="btn btn-secondary" onclick="openSettingsModal()" title="设置检测时间与采集频率">
                     <span>⚙️</span> 检测设置
                 </button>
@@ -1587,7 +1581,7 @@
             </div>
 
             <div class="default-hint" style="background: rgba(56, 189, 248, 0.08); border-color: rgba(56, 189, 248, 0.25);">
-                💡 <b>格式支持：</b>带协议 URI (<code>socks5://1.2.3.4:1080</code>)、纯地址 (<code>1.2.3.4:1080</code>)、CSV 表格、或标准 JSON。自动执行质量门禁与指纹去重。
+                💡 <b>格式支持：</b>完整元数据 CSV/JSON、Detail 档案、带协议 URI (<code>socks5://1.2.3.4:1080</code>) 或纯地址。智能保留入库时间/地区/状态等全元数据，纯地址自动解析归属地。
             </div>
 
             <div class="form-group">
@@ -2239,28 +2233,6 @@ http://45.140.146.12:8080
             showToast(`已复制当前筛选的 ${list.length} 个节点到剪贴板！`);
         }
 
-        function exportData(type) {
-            const list = getFilteredProxies();
-            let content = '';
-            let filename = `proxies_${currentFilter || 'all'}_${new Date().toISOString().slice(0, 10)}`;
-
-            if (type === 'txt') {
-                content = list.map(p => `${p.protocol}://${p.ip}:${p.port}`).join(String.fromCharCode(10));
-                filename += '.txt';
-            } else {
-                content = JSON.stringify(list, null, 2);
-                filename += '.json';
-            }
-
-            const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            a.click();
-            URL.revokeObjectURL(url);
-            showToast(`已导出下载文件: ${filename} (共 ${list.length} 个节点)`);
-        }
 
         function triggerImmediatePoll() {
             const btn = document.getElementById('btn-trigger');

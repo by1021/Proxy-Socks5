@@ -755,13 +755,76 @@ def monitor_loop():
 
 
 # ==================== 数据导入导出与数据库增强引擎 ====================
+_ip_location_cache = {}
+_ip_location_lock = threading.Lock()
+
+def resolve_ip_location(ip: str) -> tuple[str, str]:
+    """
+    智能查询 IP 物理归属地与网络运营商。
+    返回: (location, tags)
+    """
+    if not ip or not is_valid_ipv4(ip):
+        return ("未知地区", "[人工导入]")
+
+    # 私有 / 局域网判断
+    if ip.startswith(('127.', '10.', '192.168.', '169.254.', '0.')) or (ip.startswith('172.') and 16 <= int(ip.split('.')[1]) <= 31):
+        return ("局域网/专用网络", "[专用内网]")
+
+    with _ip_location_lock:
+        if ip in _ip_location_cache:
+            return _ip_location_cache[ip]
+
+    loc = ""
+    tag = "[人工导入]"
+    try:
+        req = urllib.request.Request(
+            f"http://ip-api.com/json/{ip}?lang=zh-CN",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if data.get('status') == 'success':
+                country = data.get('country', '').strip()
+                region = data.get('regionName', '').strip()
+                city = data.get('city', '').strip()
+                isp = data.get('isp', '').strip()
+                loc_parts = []
+                for p in [country, region, city]:
+                    if p and p not in loc_parts:
+                        loc_parts.append(p)
+                loc = " ".join(loc_parts)
+                if isp:
+                    short_isp = isp.split()[0]
+                    tag = f"[{short_isp}]"
+    except Exception:
+        pass
+
+    if not loc:
+        loc = "人工导入"
+
+    with _ip_location_lock:
+        _ip_location_cache[ip] = (loc, tag)
+
+    return (loc, tag)
+
+
+def verify_proxy_with_timing(proto: str, ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, float]:
+    """带实测延迟的可用性验证，返回 (ok, latency_ms)"""
+    t0 = time.perf_counter()
+    ok = verify_proxy_candidate(proto, ip, port, timeout)
+    lat = round((time.perf_counter() - t0) * 1000.0, 1) if ok else 0.0
+    return (ok, lat)
+
+
 def parse_import_payload(raw_content: str, default_proto: str = "socks5") -> list:
     """
-    智能解析用户导入的文本，支持 JSON、CSV、带协议 URI、纯 IP:PORT、detail 格式及自由文本。
-    返回规范化的候选字典列表: [{"protocol": ..., "ip": ..., "port": ..., "location": ..., "tags": ...}, ...]
+    智能解析用户导入的文本，完整提取全部元数据：
+    协议(protocol)、IP(ip)、端口(port)、详细地理位置(location)、标签(tags)、
+    入库时间(entry_time)、最后检测时间(last_check_time)、状态(status)、延迟(latency_ms)、失败次数(fail_count)。
+    支持格式：JSON、标准/自定义 CSV、Detail 元数据文本、带协议 URI、纯 IP:PORT 等。
     """
     candidates = []
-    text = (raw_content or "").strip()
+    text = (raw_content or "").strip().lstrip('﻿')
     if not text:
         return candidates
 
@@ -777,92 +840,266 @@ def parse_import_payload(raw_content: str, default_proto: str = "socks5") -> lis
                         port = int(item.get('port', 0))
                     except (ValueError, TypeError):
                         continue
-                    proto = str(item.get('protocol') or item.get('type') or default_proto).lower().strip()
-                    loc = str(item.get('location') or '人工导入').strip()
-                    tags = str(item.get('tags') or '[自定义]').strip()
+                    proto = str(item.get('protocol') or item.get('proto') or item.get('type') or default_proto).lower().strip()
+                    loc = str(item.get('location') or item.get('geo') or item.get('country') or '').strip()
+                    tags = str(item.get('tags') or item.get('tag') or '').strip()
+                    entry_time = str(item.get('entry_time') or item.get('time') or '').strip()
+                    last_check_time = str(item.get('last_check_time') or '').strip()
+                    status = str(item.get('status') or 'active').strip().lower()
+
+                    try:
+                        latency_ms = float(item.get('latency_ms', 0.0) or 0.0)
+                    except (ValueError, TypeError):
+                        latency_ms = 0.0
+                    try:
+                        fail_count = int(item.get('fail_count', 0) or 0)
+                    except (ValueError, TypeError):
+                        fail_count = 0
+
+                    if not loc:
+                        loc, auto_tag = resolve_ip_location(ip)
+                        if not tags:
+                            tags = auto_tag
+
                     candidates.append({
                         "protocol": proto,
                         "ip": ip,
                         "port": port,
-                        "location": loc,
-                        "tags": tags
+                        "location": loc or "人工导入",
+                        "tags": tags or "[自定义]",
+                        "entry_time": entry_time,
+                        "last_check_time": last_check_time,
+                        "status": status if status in ('active', 'dead') else 'active',
+                        "latency_ms": latency_ms,
+                        "fail_count": fail_count
                     })
                 elif isinstance(item, str):
                     m = re.match(r'(?:(socks5|https?|http)://)?([0-9.]+):([0-9]+)', item.strip(), re.I)
                     if m:
                         p, ip, port = m.group(1) or default_proto, m.group(2), int(m.group(3))
+                        loc, auto_tag = resolve_ip_location(ip)
                         candidates.append({
                             "protocol": p.lower(),
                             "ip": ip,
                             "port": port,
-                            "location": "人工导入",
-                            "tags": "[自定义]"
+                            "location": loc,
+                            "tags": auto_tag,
+                            "entry_time": "",
+                            "last_check_time": "",
+                            "status": "active",
+                            "latency_ms": 0.0,
+                            "fail_count": 0
                         })
             if candidates:
                 return candidates
         except Exception:
             pass
 
-    # 2. 逐行规则与智能解析
+    # 2. 尝试标准/自定义 CSV 解析 (基于 csv.reader，处理带表头、含逗号和转义的完整表格)
+    if ',' in text:
+        try:
+            reader = csv.reader(io.StringIO(text))
+            rows = [r for r in reader if r and any(cell.strip() for cell in r)]
+            if rows:
+                first_row = [c.strip().lower() for c in rows[0]]
+                header_keys = [c.replace(' ', '').replace('_', '') for c in first_row]
+                has_header = any(k in ('ip', 'port', 'protocol', 'proto', 'type', 'id', 'location', '地区', '入库时间', 'status') for k in header_keys)
+
+                if has_header:
+                    col_map = {k: idx for idx, k in enumerate(header_keys)}
+                    for r in rows[1:]:
+                        if not r:
+                            continue
+
+                        def get_col(keys: list, default=''):
+                            for k in keys:
+                                idx = col_map.get(k)
+                                if idx is not None and idx < len(r):
+                                    v = r[idx].strip()
+                                    if v:
+                                        return v
+                            return default
+
+                        ip = get_col(['ip', 'ipaddress', 'ip地址', 'host', 'node'])
+                        port_str = get_col(['port', '端口'])
+                        if not ip or not port_str:
+                            continue
+                        try:
+                            port = int(port_str)
+                        except ValueError:
+                            continue
+
+                        proto = get_col(['protocol', 'proto', 'type', '协议'], default_proto).lower()
+                        loc = get_col(['location', 'geo', '地区', '省市', '位置'])
+                        tags = get_col(['tags', 'tag', '属性', '标签'])
+                        entry_time = get_col(['entrytime', '入库时间', 'time', '时间'])
+                        last_check_time = get_col(['lastchecktime', '检测时间', '最后检测时间'])
+                        status = get_col(['status', '状态'], 'active').lower()
+
+                        try:
+                            latency_ms = float(get_col(['latencyms', 'latency', '延迟'], '0.0'))
+                        except ValueError:
+                            latency_ms = 0.0
+                        try:
+                            fail_count = int(get_col(['failcount', '失败次数'], '0'))
+                        except ValueError:
+                            fail_count = 0
+
+                        if not loc:
+                            loc, auto_tag = resolve_ip_location(ip)
+                            if not tags:
+                                tags = auto_tag
+
+                        candidates.append({
+                            "protocol": proto,
+                            "ip": ip,
+                            "port": port,
+                            "location": loc or "人工导入",
+                            "tags": tags or "[自定义]",
+                            "entry_time": entry_time,
+                            "last_check_time": last_check_time,
+                            "status": status if status in ('active', 'dead') else 'active',
+                            "latency_ms": latency_ms,
+                            "fail_count": fail_count
+                        })
+                    if candidates:
+                        return candidates
+        except Exception:
+            pass
+
+    # 3. 逐行规则与 Detail / 无表头 CSV / URI / 纯 IP 解析
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith('#'):
             continue
 
-        # 模式 A: detail.txt 格式: [时间] | proto://ip:port | 地区: xxx | 属性: yyy
-        detail_m = re.match(r'(?:\[.*?\]\s*\|\s*)?(socks5|https?)://([^:]+):(\d+)(?:\s*\|\s*地区:\s*(.*?))?(?:\s*\|\s*属性:\s*(.*?))?$', line, re.I)
+        # 模式 A: detail.txt 格式: [时间] | proto://ip:port | 地区: xxx | 属性: yyy [| 状态: zzz | 延迟: nnnms]
+        detail_m = re.match(
+            r'(?:\[(.*?)\]\s*\|\s*)?(socks5|https?)://([^:]+):(\d+)'
+            r'(?:\s*\|\s*地区:\s*(.*?))?'
+            r'(?:\s*\|\s*属性:\s*(.*?))?'
+            r'(?:\s*\|\s*状态:\s*(.*?))?'
+            r'(?:\s*\|\s*延迟:\s*([0-9.]+)ms)?$',
+            line, re.I
+        )
         if detail_m:
-            proto, ip, port_str, loc, tags = detail_m.groups()
+            e_time, proto, ip, port_str, loc, tags, st, lat = detail_m.groups()
             try:
                 port = int(port_str)
+                lat_ms = float(lat) if lat else 0.0
+                st_val = (st or 'active').strip().lower()
                 candidates.append({
                     "protocol": proto.lower(),
                     "ip": ip.strip(),
                     "port": port,
                     "location": (loc or "人工导入").strip(),
-                    "tags": (tags or "[自定义]").strip()
+                    "tags": (tags or "[自定义]").strip(),
+                    "entry_time": (e_time or "").strip(),
+                    "last_check_time": (e_time or "").strip(),
+                    "status": st_val if st_val in ('active', 'dead') else 'active',
+                    "latency_ms": lat_ms,
+                    "fail_count": 0
                 })
                 continue
             except ValueError:
                 pass
 
-        # 模式 B: CSV 格式 (例如 protocol,ip,port[,location,tags] 或 ip,port[,protocol,location,tags])
+        # 模式 B: 无表头的 CSV 行 (例如: id,proto,ip,port,loc,tags,entry_time... 或 proto,ip,port...)
         if ',' in line:
             parts = [p.strip() for p in line.split(',')]
             if len(parts) >= 2:
-                # 跳过表头
-                if parts[0].lower() in ('protocol', 'type', 'ip') or parts[1].lower() in ('ip', 'port'):
-                    continue
+                # 检查第一列是否是数字且第二列是协议 (例如系统导出的无表头格式: id, protocol, ip, port, ...)
+                if parts[0].isdigit() and len(parts) >= 4 and parts[1].lower() in ('socks5', 'http', 'https'):
+                    try:
+                        proto = parts[1].lower()
+                        ip = parts[2]
+                        port = int(parts[3])
+                        loc = parts[4] if len(parts) > 4 else ''
+                        tags = parts[5] if len(parts) > 5 else ''
+                        e_time = parts[6] if len(parts) > 6 else ''
+                        l_check = parts[7] if len(parts) > 7 else ''
+                        st = parts[8].lower() if len(parts) > 8 and parts[8].lower() in ('active', 'dead') else 'active'
+                        try:
+                            lat = float(parts[9]) if len(parts) > 9 else 0.0
+                        except ValueError:
+                            lat = 0.0
+                        try:
+                            fc = int(parts[10]) if len(parts) > 10 else 0
+                        except ValueError:
+                            fc = 0
+                        if not loc:
+                            loc, auto_tag = resolve_ip_location(ip)
+                            if not tags:
+                                tags = auto_tag
+                        candidates.append({
+                            "protocol": proto,
+                            "ip": ip,
+                            "port": port,
+                            "location": loc or "人工导入",
+                            "tags": tags or "[自定义]",
+                            "entry_time": e_time,
+                            "last_check_time": l_check,
+                            "status": st,
+                            "latency_ms": lat,
+                            "fail_count": fc
+                        })
+                        continue
+                    except (ValueError, IndexError):
+                        pass
+
+                # 协议开头的行 (proto, ip, port, loc, tags, ...)
                 if parts[0].lower() in ('socks5', 'http', 'https'):
                     proto = parts[0].lower()
                     ip = parts[1]
                     try:
                         port = int(parts[2])
-                        loc = parts[3] if len(parts) > 3 else '人工导入'
-                        tags = parts[4] if len(parts) > 4 else '[自定义]'
+                        loc = parts[3] if len(parts) > 3 else ''
+                        tags = parts[4] if len(parts) > 4 else ''
+                        e_time = parts[5] if len(parts) > 5 else ''
+                        if not loc:
+                            loc, auto_tag = resolve_ip_location(ip)
+                            if not tags:
+                                tags = auto_tag
                         candidates.append({
                             "protocol": proto,
                             "ip": ip,
                             "port": port,
-                            "location": loc,
-                            "tags": tags
+                            "location": loc or "人工导入",
+                            "tags": tags or "[自定义]",
+                            "entry_time": e_time,
+                            "last_check_time": e_time,
+                            "status": "active",
+                            "latency_ms": 0.0,
+                            "fail_count": 0
                         })
                         continue
                     except (ValueError, IndexError):
                         pass
-                else:
+
+                # IP 开头的行 (ip, port, proto, loc, tags, ...)
+                if is_valid_ipv4(parts[0]):
                     ip = parts[0]
                     try:
                         port = int(parts[1])
                         proto = parts[2].lower() if len(parts) > 2 and parts[2].lower() in ('socks5', 'http', 'https') else default_proto
-                        loc = parts[3] if len(parts) > 3 else '人工导入'
-                        tags = parts[4] if len(parts) > 4 else '[自定义]'
+                        loc = parts[3] if len(parts) > 3 else ''
+                        tags = parts[4] if len(parts) > 4 else ''
+                        e_time = parts[5] if len(parts) > 5 else ''
+                        if not loc:
+                            loc, auto_tag = resolve_ip_location(ip)
+                            if not tags:
+                                tags = auto_tag
                         candidates.append({
                             "protocol": proto,
                             "ip": ip,
                             "port": port,
-                            "location": loc,
-                            "tags": tags
+                            "location": loc or "人工导入",
+                            "tags": tags or "[自定义]",
+                            "entry_time": e_time,
+                            "last_check_time": e_time,
+                            "status": "active",
+                            "latency_ms": 0.0,
+                            "fail_count": 0
                         })
                         continue
                     except (ValueError, IndexError):
@@ -873,12 +1110,19 @@ def parse_import_payload(raw_content: str, default_proto: str = "socks5") -> lis
         if uri_m:
             proto, ip, port_str = uri_m.groups()
             try:
+                port = int(port_str)
+                loc, auto_tag = resolve_ip_location(ip)
                 candidates.append({
                     "protocol": proto.lower(),
                     "ip": ip,
-                    "port": int(port_str),
-                    "location": "人工导入",
-                    "tags": "[自定义]"
+                    "port": port,
+                    "location": loc,
+                    "tags": auto_tag,
+                    "entry_time": "",
+                    "last_check_time": "",
+                    "status": "active",
+                    "latency_ms": 0.0,
+                    "fail_count": 0
                 })
                 continue
             except ValueError:
@@ -889,12 +1133,19 @@ def parse_import_payload(raw_content: str, default_proto: str = "socks5") -> lis
         if ip_port_m:
             ip, port_str = ip_port_m.groups()
             try:
+                port = int(port_str)
+                loc, auto_tag = resolve_ip_location(ip)
                 candidates.append({
                     "protocol": default_proto.lower(),
                     "ip": ip,
-                    "port": int(port_str),
-                    "location": "人工导入",
-                    "tags": "[自定义]"
+                    "port": port,
+                    "location": loc,
+                    "tags": auto_tag,
+                    "entry_time": "",
+                    "last_check_time": "",
+                    "status": "active",
+                    "latency_ms": 0.0,
+                    "fail_count": 0
                 })
             except ValueError:
                 pass
@@ -905,10 +1156,10 @@ def parse_import_payload(raw_content: str, default_proto: str = "socks5") -> lis
 def batch_import_nodes(candidates: list, verify_now: bool = False, max_verify_workers: int = 16) -> dict:
     """
     批量导入节点主流水线：
-    1. 质量门禁过滤（合法 IPv4、反 X 节点、端口范围）
+    1. 质量门禁过滤（合法 IPv4、反 X 节点、端口范围 1~65535）
     2. 指纹库与批次内去重
     3. 可选并发实跑可用性探活（verify_now=True）
-    4. 批量原子写入 SQLite 并同步更新内存指纹
+    4. 批量原子写入 SQLite，完整保留全部元数据（entry_time, location, tags, latency_ms 等）并同步更新内存指纹
     """
     stats = {
         "status": "ok",
@@ -959,12 +1210,40 @@ def batch_import_nodes(candidates: list, verify_now: bool = False, max_verify_wo
                 stats["duplicates_skipped"] += 1
                 continue
 
+        # 完整保留原始元数据
+        e_time = str(c.get('entry_time') or '').strip()
+        if not re.match(r'^\d{4}-\d{2}-\d{2}', e_time):
+            e_time = now_str
+
+        l_check = str(c.get('last_check_time') or '').strip()
+        if not re.match(r'^\d{4}-\d{2}-\d{2}', l_check):
+            l_check = e_time
+
+        st = str(c.get('status') or 'active').strip().lower()
+        if st not in ('active', 'dead'):
+            st = 'active'
+
+        try:
+            lat = float(c.get('latency_ms', 0.0) or 0.0)
+        except (ValueError, TypeError):
+            lat = 0.0
+
+        try:
+            fc = int(c.get('fail_count', 0) or 0)
+        except (ValueError, TypeError):
+            fc = 0
+
         pre_filtered.append({
             "protocol": proto,
             "ip": ip,
             "port": port,
             "location": str(c.get('location') or '人工导入').strip(),
-            "tags": str(c.get('tags') or '[自定义]').strip()
+            "tags": str(c.get('tags') or '[自定义]').strip(),
+            "entry_time": e_time,
+            "last_check_time": l_check,
+            "status": st,
+            "latency_ms": lat,
+            "fail_count": fc
         })
 
     if not pre_filtered:
@@ -978,13 +1257,17 @@ def batch_import_nodes(candidates: list, verify_now: bool = False, max_verify_wo
         workers = min(max_verify_workers, max(1, len(pre_filtered)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_node = {
-                executor.submit(verify_proxy_candidate, item['protocol'], item['ip'], item['port'], PROBE_TIMEOUT): item
+                executor.submit(verify_proxy_with_timing, item['protocol'], item['ip'], item['port'], PROBE_TIMEOUT): item
                 for item in pre_filtered
             }
             for future in concurrent.futures.as_completed(future_to_node):
                 node_item = future_to_node[future]
                 try:
-                    if future.result():
+                    ok, lat_measured = future.result()
+                    if ok:
+                        node_item['status'] = 'active'
+                        node_item['latency_ms'] = lat_measured
+                        node_item['last_check_time'] = now_str
                         survivors.append(node_item)
                     else:
                         stats["verify_failed"] += 1
@@ -997,9 +1280,10 @@ def batch_import_nodes(candidates: list, verify_now: bool = False, max_verify_wo
         stats["message"] = f"验证完成，候选节点均未通过存活测试 (失败 {stats['verify_failed']} 个)"
         return stats
 
-    # 批量入库
+    # 批量入库 - 完整写入全部 10 个数据字段！
     insert_rows = [
-        (s['protocol'], s['ip'], s['port'], s['location'], s['tags'], now_str, now_str, 'active')
+        (s['protocol'], s['ip'], s['port'], s['location'], s['tags'],
+         s['entry_time'], s['last_check_time'], s['status'], s['latency_ms'], s['fail_count'])
         for s in survivors
     ]
 
@@ -1008,8 +1292,8 @@ def batch_import_nodes(candidates: list, verify_now: bool = False, max_verify_wo
             with get_db() as conn:
                 cur = conn.executemany("""
                     INSERT OR IGNORE INTO proxies 
-                    (protocol, ip, port, location, tags, entry_time, last_check_time, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                    (protocol, ip, port, location, tags, entry_time, last_check_time, status, latency_ms, fail_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, insert_rows)
                 conn.commit()
 
@@ -1116,7 +1400,7 @@ def export_proxies_data(export_fmt: str = "csv", proto_filter: str = "all", stat
             if line_str not in seen:
                 seen.add(line_str)
                 lines.append(line_str)
-        content = "\n".join(lines).encode('utf-8')
+        content = chr(10).join(lines).encode('utf-8')
         return content, "text/plain; charset=utf-8", f"proxies_export_{ts}.txt"
 
     elif export_fmt == 'detail':
@@ -1126,8 +1410,8 @@ def export_proxies_data(export_fmt: str = "csv", proto_filter: str = "all", stat
             ep = f"{r['ip']}:{r['port']}"
             if ep not in seen:
                 seen.add(ep)
-                lines.append(f"[{r['entry_time']}] | {r['protocol'].lower()}://{r['ip']}:{r['port']} | 地区: {r['location']} | 属性: {r['tags']}")
-        content = "\n".join(lines).encode('utf-8')
+                lines.append(f"[{r['entry_time']}] | {r['protocol'].lower()}://{r['ip']}:{r['port']} | 地区: {r['location']} | 属性: {r['tags']} | 状态: {r['status']} | 延迟: {r['latency_ms']}ms")
+        content = chr(10).join(lines).encode('utf-8')
         return content, "text/plain; charset=utf-8", f"proxies_detail_export_{ts}.txt"
 
     else:  # 默认 CSV
@@ -1140,6 +1424,7 @@ def export_proxies_data(export_fmt: str = "csv", proto_filter: str = "all", stat
             writer.writerow([r['id'], r['protocol'], r['ip'], r['port'], r['location'], r['tags'], r['entry_time'], r['last_check_time'], r['status'], r['latency_ms'], r['fail_count']])
         content = output.getvalue().encode('utf-8')
         return content, "text/csv; charset=utf-8", f"proxies_export_{ts}.csv"
+
 
 
 def get_db_stats() -> dict:
@@ -1411,66 +1696,6 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                 "removed_invalid": invalid
             }
             self.wfile.write(json.dumps(resp, ensure_ascii=False, indent=2).encode('utf-8'))
-        elif path == '/api/import':
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length > 15 * 1024 * 1024:
-                self.send_response(413)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "error", "message": "上传内容过大，单次请小于 15MB"}, ensure_ascii=False).encode('utf-8'))
-                return
-
-            body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
-            c_type = self.headers.get('Content-Type', '')
-            raw_text = ""
-            default_proto = "socks5"
-            verify_now = False
-
-            try:
-                if 'application/json' in c_type:
-                    data = json.loads(body) if body else {}
-                    raw_text = data.get('content') or data.get('text') or ""
-                    default_proto = str(data.get('default_protocol') or data.get('protocol') or 'socks5').lower()
-                    verify_now = bool(data.get('verify_now', False))
-                    if not raw_text and ('proxies' in data or isinstance(data, list)):
-                        raw_text = json.dumps(data)
-                else:
-                    raw_text = body
-            except Exception:
-                raw_text = body
-
-            candidates = parse_import_payload(raw_text, default_proto=default_proto)
-            result = batch_import_nodes(candidates, verify_now=verify_now)
-
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'))
-        elif path == '/api/db/vacuum':
-            with get_db() as conn:
-                conn.execute("VACUUM;")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "message": "数据库整理优化已完成 (VACUUM 执行完毕)"}, ensure_ascii=False).encode('utf-8'))
-        elif path == '/api/db/clear':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
-            try:
-                data = json.loads(body) if body else {}
-            except Exception:
-                data = {}
-            mode = data.get('mode', 'failed')
-            res = clear_db_records(mode=mode)
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(res, ensure_ascii=False, indent=2).encode('utf-8'))
-
         # 3. JSON 格式状态统计 (/api/stats)
         elif path == '/api/stats':
             self.send_response(200)
