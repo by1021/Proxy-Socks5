@@ -1241,6 +1241,12 @@
                 <button class="theme-toggle-btn" id="theme-btn" onclick="toggleTheme()" title="切换白天/黑夜模式">
                     <span id="theme-icon">☀️</span> <span id="theme-text">浅色模式</span>
                 </button>
+                <button class="btn btn-secondary" onclick="openImportModal()" title="批量导入外部代理节点">
+                    <span>📤</span> 批量导入
+                </button>
+                <button class="btn btn-secondary" onclick="openExportModal()" title="全量与条件数据导出 / 数据库备份">
+                    <span>📥</span> 数据导出
+                </button>
                 <button class="btn btn-secondary" onclick="openSettingsModal()" title="设置检测时间与采集频率">
                     <span>⚙️</span> 检测设置
                 </button>
@@ -1307,8 +1313,8 @@
             <div class="action-buttons">
                 <button class="btn btn-secondary" onclick="copyCurrentPageNodes()">📄 复制当前页</button>
                 <button class="btn btn-secondary" onclick="copyFilteredNodes()">📋 复制全部筛选</button>
-                <button class="btn btn-secondary" onclick="exportData('txt')">📥 导出 TXT</button>
-                <button class="btn btn-secondary" onclick="exportData('json')">📥 导出 JSON</button>
+                <button class="btn btn-secondary" onclick="openImportModal()" title="批量导入节点">📤 批量导入</button>
+                <button class="btn btn-secondary" onclick="openExportModal()" title="全量导出与数据库管理">📥 全量导出</button>
             </div>
         </div>
 
@@ -1377,6 +1383,35 @@
                 <span>🔗 快捷订阅与标准化 API 端点</span>
             </div>
             <div class="api-grid">
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">📥 全量多格式数据导出</span>
+                        <span class="ver-badge">CSV / JSON / TXT</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/api/export?format=csv" target="_blank" class="api-code-link" title="点击直接导出 CSV"><code>/api/export?format=csv</code></a>
+                        <div class="api-actions">
+                            <a href="/api/export?format=csv" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">下载 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/api/export?format=csv')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">支持参数 <code>format</code>(csv/json/txt/detail)、<code>proto</code>、<code>status</code> 等无分页截断导出。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">💾 数据库原子快照备份</span>
+                        <span class="ver-badge">SQLite .db</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/api/db/backup" target="_blank" class="api-code-link" title="点击下载 SQLite 备份"><code>/api/db/backup</code></a>
+                        <div class="api-actions">
+                            <a href="/api/db/backup" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">下载 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/api/db/backup')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">基于 SQLite 在线热备份 API，免加锁导出完整一致性的 <code>data.db</code> 二进制快照。</div>
+                </div>
                 <div class="api-item">
                     <div class="api-title-row">
                         <span class="api-name">🌟 全部有效代理列表</span>
@@ -1539,6 +1574,148 @@
                 <button class="btn btn-secondary" onclick="resetToDefaults()">恢复默认值</button>
                 <button class="btn btn-secondary" onclick="closeSettingsModal()">取消</button>
                 <button class="btn btn-primary" id="btn-save-cfg" onclick="saveSettings()">💾 保存并应用</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 批量导入 Modal -->
+    <div class="modal-overlay" id="import-modal" onclick="handleImportModalOverlayClick(event)">
+        <div class="modal-box" style="max-width: 620px;">
+            <div class="modal-header">
+                <div class="modal-title"><span>📤</span> 批量导入代理节点</div>
+                <button class="modal-close" onclick="closeImportModal()">&times;</button>
+            </div>
+
+            <div class="default-hint" style="background: rgba(56, 189, 248, 0.08); border-color: rgba(56, 189, 248, 0.25);">
+                💡 <b>格式支持：</b>带协议 URI (<code>socks5://1.2.3.4:1080</code>)、纯地址 (<code>1.2.3.4:1080</code>)、CSV 表格、或标准 JSON。自动执行质量门禁与指纹去重。
+            </div>
+
+            <div class="form-group">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
+                    <label class="form-label" style="margin-bottom:0;">导入内容或文件</label>
+                    <div style="display:flex; gap:8px;">
+                        <input type="file" id="import-file-input" style="display:none;" accept=".txt,.csv,.json" onchange="handleFileSelect(event)">
+                        <button type="button" class="btn btn-secondary" style="padding: 4px 10px; font-size: 12px;" onclick="document.getElementById('import-file-input').click()">
+                            📁 选择本地文件 (.txt / .csv / .json)
+                        </button>
+                    </div>
+                </div>
+                <div id="file-info-badge" style="display:none; font-size:12px; color:var(--primary); margin-bottom:6px; padding: 4px 10px; background:rgba(56,189,248,0.1); border-radius:6px;"></div>
+                <textarea id="import-text" class="form-input" style="height: 140px; resize: vertical; font-family: monospace; font-size: 12px; line-height: 1.5;" placeholder="直接粘贴代理列表，例如：
+socks5://103.152.112.162:1080
+http://45.140.146.12:8080
+185.199.110.153:9050
+[2026-10-05] | socks5://1.2.3.4:1080 | 地区: 香港 | 属性: 机房"></textarea>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px;">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label class="form-label">默认协议 (无协议前缀时)</label>
+                    <select id="import-default-proto" class="form-input" style="cursor: pointer;">
+                        <option value="socks5" selected>SOCKS5 代理</option>
+                        <option value="http">HTTP 代理</option>
+                        <option value="https">HTTPS (SSL隧道) 代理</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label class="form-label">入库前连通性探活</label>
+                    <div style="padding-top: 8px;">
+                        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; color:var(--text-main);">
+                            <input type="checkbox" id="import-verify-now">
+                            <span>即时探测并仅保留存活节点</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div id="import-result-box" style="display: none; padding: 12px 14px; border-radius: 12px; background: rgba(0,0,0,0.25); border: 1px solid var(--card-border); margin-bottom: 16px;">
+                <div id="import-result-title" style="font-weight: 700; font-size: 13px; margin-bottom: 8px; color: var(--text-main);"></div>
+                <div style="display: flex; gap: 12px; font-size: 12px; color: var(--text-muted); flex-wrap: wrap;">
+                    <span>解析条数: <b id="res-total" style="color:var(--text-main);">0</b></span>
+                    <span>成功入库: <b id="res-success" style="color:#10b981;">0</b></span>
+                    <span>去重跳过: <b id="res-dups" style="color:#f59e0b;">0</b></span>
+                    <span>格式非法: <b id="res-invalid" style="color:#ef4444;">0</b></span>
+                    <span id="res-verify-span" style="display:none;">探活失败: <b id="res-verify-fail" style="color:#ef4444;">0</b></span>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeImportModal()">关闭</button>
+                <button class="btn btn-primary" id="btn-do-import" onclick="executeImport()">🚀 开始智能入库</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 数据导出与数据库管理 Modal -->
+    <div class="modal-overlay" id="export-modal" onclick="handleExportModalOverlayClick(event)">
+        <div class="modal-box" style="max-width: 580px;">
+            <div class="modal-header">
+                <div class="modal-title"><span>📥</span> 代理数据全量导出与数据库管理</div>
+                <button class="modal-close" onclick="closeExportModal()">&times;</button>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">导出格式规范</label>
+                <div class="preset-pills" id="export-format-pills" style="margin-top:6px;">
+                    <span class="preset-pill active" data-fmt="csv" onclick="setExportFormat('csv')">📊 CSV 表格 (Excel通用)</span>
+                    <span class="preset-pill" data-fmt="json" onclick="setExportFormat('json')">📦 JSON 结构体</span>
+                    <span class="preset-pill" data-fmt="txt" onclick="setExportFormat('txt')">📃 TXT 订阅列表</span>
+                    <span class="preset-pill" data-fmt="detail" onclick="setExportFormat('detail')">📋 Detail 详细元数据</span>
+                    <span class="preset-pill" data-fmt="sqlite" onclick="setExportFormat('sqlite')">💾 SQLite 数据库备份 (.db)</span>
+                </div>
+            </div>
+
+            <div id="export-filter-section" style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px;">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label class="form-label">协议筛选</label>
+                    <select id="export-proto" class="form-input" style="cursor: pointer;">
+                        <option value="all" selected>全部协议 (SOCKS5/HTTP/HTTPS)</option>
+                        <option value="socks5">仅 SOCKS5 代理</option>
+                        <option value="https">仅 HTTPS (SSL隧道) 代理</option>
+                        <option value="http">仅 HTTP 代理</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label class="form-label">节点状态</label>
+                    <select id="export-status" class="form-input" style="cursor: pointer;">
+                        <option value="all" selected>全部节点 (全量库)</option>
+                        <option value="active">仅存活有效节点 (active)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="export-raw-opt" class="form-group" style="display:none; margin-bottom: 16px;">
+                <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; color:var(--text-main);">
+                    <input type="checkbox" id="export-raw-check">
+                    <span>纯 IP:端口 模式 (不附带 protocol:// 前缀)</span>
+                </label>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 18px;">
+                <label class="form-label">数据库当前状态与运维</label>
+                <div style="background: rgba(0,0,0,0.2); border:1px solid var(--card-border); border-radius:12px; padding:12px 14px; font-size:12px; color:var(--text-muted); line-height: 1.6;">
+                    <div style="display:flex; justify-content:space-between;">
+                        <span>文件路径: <b id="db-stat-path" style="color:var(--text-main); font-family:monospace;">data.db</b></span>
+                        <span>文件大小: <b id="db-stat-size" style="color:var(--primary);">--</b></span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; margin-top:4px;">
+                        <span>库中总记录: <b id="db-stat-total" style="color:var(--text-main);">--</b> 条</span>
+                        <span>运行模式: <b style="color:#10b981;">SQLite 3 (WAL 极速并发)</b></span>
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; margin-top:8px;">
+                    <button type="button" class="btn btn-secondary" style="font-size:12px; padding: 4px 10px;" onclick="triggerVacuumDb()">
+                        ⚡ 压缩与重建索引 (VACUUM)
+                    </button>
+                    <button type="button" class="btn btn-secondary" style="font-size:12px; padding: 4px 10px; color:#ef4444;" onclick="triggerClearDb()">
+                        🧹 清理非存活节点
+                    </button>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeExportModal()">取消</button>
+                <button class="btn btn-primary" id="btn-do-export" onclick="executeExportDownload()">📥 确认导出并下载</button>
             </div>
         </div>
     </div>
@@ -2150,6 +2327,194 @@
                     updateCountdown();
                 })
                 .catch(e => console.error('加载状态统计失败', e));
+        }
+
+        // ================= 数据导入模态框与逻辑 =================
+        function openImportModal() {
+            document.getElementById('import-modal').classList.add('active');
+            document.getElementById('import-result-box').style.display = 'none';
+        }
+
+        function closeImportModal() {
+            document.getElementById('import-modal').classList.remove('active');
+        }
+
+        function handleImportModalOverlayClick(e) {
+            if (e.target.id === 'import-modal') {
+                closeImportModal();
+            }
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const badge = document.getElementById('file-info-badge');
+            badge.style.display = 'block';
+            badge.innerText = `已选择文件: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                document.getElementById('import-text').value = e.target.result;
+                showToast(`已成功载入文件 ${file.name} 内容`);
+            };
+            reader.readAsText(file);
+        }
+
+        function executeImport() {
+            const text = document.getElementById('import-text').value.trim();
+            if (!text) {
+                showToast('请先输入代理文本或上传文件', false);
+                return;
+            }
+            const defaultProto = document.getElementById('import-default-proto').value;
+            const verifyNow = document.getElementById('import-verify-now').checked;
+            const btn = document.getElementById('btn-do-import');
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> 正在导入处理...';
+
+            fetch('/api/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    content: text,
+                    default_protocol: defaultProto,
+                    verify_now: verifyNow
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                const resBox = document.getElementById('import-result-box');
+                resBox.style.display = 'block';
+                document.getElementById('import-result-title').innerText = data.message || '导入操作完成';
+                document.getElementById('res-total').innerText = data.total_parsed || 0;
+                document.getElementById('res-success').innerText = data.success_imported || 0;
+                document.getElementById('res-dups').innerText = data.duplicates_skipped || 0;
+                document.getElementById('res-invalid').innerText = data.invalid_filtered || 0;
+
+                const verifySpan = document.getElementById('res-verify-span');
+                if (verifyNow) {
+                    verifySpan.style.display = 'inline';
+                    document.getElementById('res-verify-fail').innerText = data.verify_failed || 0;
+                } else {
+                    verifySpan.style.display = 'none';
+                }
+
+                showToast(data.message || '导入成功！');
+                loadData();
+            })
+            .catch(err => {
+                showToast('导入失败: ' + err, false);
+            })
+            .finally(() => {
+                btn.disabled = false;
+                btn.innerHTML = '🚀 开始智能入库';
+            });
+        }
+
+        // ================= 数据导出与数据库管理模态框 =================
+        let currentExportFormat = 'csv';
+
+        function openExportModal() {
+            document.getElementById('export-modal').classList.add('active');
+            loadDbStats();
+        }
+
+        function closeExportModal() {
+            document.getElementById('export-modal').classList.remove('active');
+        }
+
+        function handleExportModalOverlayClick(e) {
+            if (e.target.id === 'export-modal') {
+                closeExportModal();
+            }
+        }
+
+        function setExportFormat(fmt) {
+            currentExportFormat = fmt;
+            document.querySelectorAll('#export-format-pills .preset-pill').forEach(pill => {
+                if (pill.getAttribute('data-fmt') === fmt) {
+                    pill.classList.add('active');
+                } else {
+                    pill.classList.remove('active');
+                }
+            });
+
+            const filterSec = document.getElementById('export-filter-section');
+            const rawOpt = document.getElementById('export-raw-opt');
+
+            if (fmt === 'sqlite') {
+                filterSec.style.opacity = '0.5';
+                filterSec.style.pointerEvents = 'none';
+                rawOpt.style.display = 'none';
+            } else {
+                filterSec.style.opacity = '1';
+                filterSec.style.pointerEvents = 'auto';
+                rawOpt.style.display = (fmt === 'txt') ? 'block' : 'none';
+            }
+        }
+
+        function loadDbStats() {
+            fetch('/api/db/stats')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        document.getElementById('db-stat-path').innerText = data.db_file.split('/').pop();
+                        document.getElementById('db-stat-size').innerText = data.db_size_formatted;
+                        document.getElementById('db-stat-total').innerText = data.total_nodes;
+                    }
+                })
+                .catch(e => console.error('获取数据库信息失败', e));
+        }
+
+        function triggerVacuumDb() {
+            showToast('正在执行数据库压缩与索引重建...');
+            fetch('/api/db/vacuum', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    showToast(data.message || 'VACUUM 执行完成');
+                    loadDbStats();
+                })
+                .catch(err => showToast('VACUUM 失败: ' + err, false));
+        }
+
+        function triggerClearDb() {
+            if (!confirm('确定要清理数据库中的非存活/失败节点吗？')) return;
+            fetch('/api/db/clear', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'failed' })
+            })
+            .then(r => r.json())
+            .then(data => {
+                showToast(`清理完成，共移除 ${data.deleted_count} 条非存活记录`);
+                loadDbStats();
+                loadData();
+            })
+            .catch(err => showToast('清理失败: ' + err, false));
+        }
+
+        function executeExportDownload() {
+            if (currentExportFormat === 'sqlite') {
+                const url = '/api/db/backup';
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `proxies_backup_${new Date().toISOString().slice(0, 10)}.db`;
+                a.click();
+                showToast('已开始下载 SQLite 数据库原子快照文件！');
+                closeExportModal();
+                return;
+            }
+
+            const proto = document.getElementById('export-proto').value;
+            const status = document.getElementById('export-status').value;
+            const raw = document.getElementById('export-raw-check').checked ? '1' : '0';
+            const url = `/api/export?format=${currentExportFormat}&proto=${proto}&status=${status}&raw=${raw}`;
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `proxies_${proto}_${status}.${currentExportFormat}`;
+            a.click();
+            showToast(`已发起全量 ${currentExportFormat.toUpperCase()} 数据导出下载！`);
+            closeExportModal();
         }
 
         // 初始化

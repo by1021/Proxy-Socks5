@@ -26,6 +26,8 @@ import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import bs4
 import sqlite3
+import csv
+import io
 import signal
 
 # 适配 Windows 控制台 UTF-8 输出
@@ -751,6 +753,441 @@ def monitor_loop():
         poll_event.wait(POLL_INTERVAL)
         poll_event.clear()
 
+
+# ==================== 数据导入导出与数据库增强引擎 ====================
+def parse_import_payload(raw_content: str, default_proto: str = "socks5") -> list:
+    """
+    智能解析用户导入的文本，支持 JSON、CSV、带协议 URI、纯 IP:PORT、detail 格式及自由文本。
+    返回规范化的候选字典列表: [{"protocol": ..., "ip": ..., "port": ..., "location": ..., "tags": ...}, ...]
+    """
+    candidates = []
+    text = (raw_content or "").strip()
+    if not text:
+        return candidates
+
+    # 1. 尝试 JSON 解析 (支持 [{"ip":...}] 或 {"proxies": [...]} 或纯字符串数组)
+    if (text.startswith('[') and text.endswith(']')) or (text.startswith('{') and text.endswith('}')):
+        try:
+            parsed = json.loads(text)
+            items = parsed if isinstance(parsed, list) else (parsed.get('proxies') or parsed.get('data') or [])
+            for item in items:
+                if isinstance(item, dict):
+                    ip = str(item.get('ip', '')).strip()
+                    try:
+                        port = int(item.get('port', 0))
+                    except (ValueError, TypeError):
+                        continue
+                    proto = str(item.get('protocol') or item.get('type') or default_proto).lower().strip()
+                    loc = str(item.get('location') or '人工导入').strip()
+                    tags = str(item.get('tags') or '[自定义]').strip()
+                    candidates.append({
+                        "protocol": proto,
+                        "ip": ip,
+                        "port": port,
+                        "location": loc,
+                        "tags": tags
+                    })
+                elif isinstance(item, str):
+                    m = re.match(r'(?:(socks5|https?|http)://)?([0-9.]+):([0-9]+)', item.strip(), re.I)
+                    if m:
+                        p, ip, port = m.group(1) or default_proto, m.group(2), int(m.group(3))
+                        candidates.append({
+                            "protocol": p.lower(),
+                            "ip": ip,
+                            "port": port,
+                            "location": "人工导入",
+                            "tags": "[自定义]"
+                        })
+            if candidates:
+                return candidates
+        except Exception:
+            pass
+
+    # 2. 逐行规则与智能解析
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+
+        # 模式 A: detail.txt 格式: [时间] | proto://ip:port | 地区: xxx | 属性: yyy
+        detail_m = re.match(r'(?:\[.*?\]\s*\|\s*)?(socks5|https?)://([^:]+):(\d+)(?:\s*\|\s*地区:\s*(.*?))?(?:\s*\|\s*属性:\s*(.*?))?$', line, re.I)
+        if detail_m:
+            proto, ip, port_str, loc, tags = detail_m.groups()
+            try:
+                port = int(port_str)
+                candidates.append({
+                    "protocol": proto.lower(),
+                    "ip": ip.strip(),
+                    "port": port,
+                    "location": (loc or "人工导入").strip(),
+                    "tags": (tags or "[自定义]").strip()
+                })
+                continue
+            except ValueError:
+                pass
+
+        # 模式 B: CSV 格式 (例如 protocol,ip,port[,location,tags] 或 ip,port[,protocol,location,tags])
+        if ',' in line:
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 2:
+                # 跳过表头
+                if parts[0].lower() in ('protocol', 'type', 'ip') or parts[1].lower() in ('ip', 'port'):
+                    continue
+                if parts[0].lower() in ('socks5', 'http', 'https'):
+                    proto = parts[0].lower()
+                    ip = parts[1]
+                    try:
+                        port = int(parts[2])
+                        loc = parts[3] if len(parts) > 3 else '人工导入'
+                        tags = parts[4] if len(parts) > 4 else '[自定义]'
+                        candidates.append({
+                            "protocol": proto,
+                            "ip": ip,
+                            "port": port,
+                            "location": loc,
+                            "tags": tags
+                        })
+                        continue
+                    except (ValueError, IndexError):
+                        pass
+                else:
+                    ip = parts[0]
+                    try:
+                        port = int(parts[1])
+                        proto = parts[2].lower() if len(parts) > 2 and parts[2].lower() in ('socks5', 'http', 'https') else default_proto
+                        loc = parts[3] if len(parts) > 3 else '人工导入'
+                        tags = parts[4] if len(parts) > 4 else '[自定义]'
+                        candidates.append({
+                            "protocol": proto,
+                            "ip": ip,
+                            "port": port,
+                            "location": loc,
+                            "tags": tags
+                        })
+                        continue
+                    except (ValueError, IndexError):
+                        pass
+
+        # 模式 C: 带协议 URI 正则搜索 (socks5://1.2.3.4:1080)
+        uri_m = re.search(r'(socks5|https?|http)://([0-9.]+):([0-9]{1,5})', line, re.I)
+        if uri_m:
+            proto, ip, port_str = uri_m.groups()
+            try:
+                candidates.append({
+                    "protocol": proto.lower(),
+                    "ip": ip,
+                    "port": int(port_str),
+                    "location": "人工导入",
+                    "tags": "[自定义]"
+                })
+                continue
+            except ValueError:
+                pass
+
+        # 模式 D: 纯 IP:PORT 正则搜索 (1.2.3.4:1080)
+        ip_port_m = re.search(r'([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]{1,5})', line)
+        if ip_port_m:
+            ip, port_str = ip_port_m.groups()
+            try:
+                candidates.append({
+                    "protocol": default_proto.lower(),
+                    "ip": ip,
+                    "port": int(port_str),
+                    "location": "人工导入",
+                    "tags": "[自定义]"
+                })
+            except ValueError:
+                pass
+
+    return candidates
+
+
+def batch_import_nodes(candidates: list, verify_now: bool = False, max_verify_workers: int = 16) -> dict:
+    """
+    批量导入节点主流水线：
+    1. 质量门禁过滤（合法 IPv4、反 X 节点、端口范围）
+    2. 指纹库与批次内去重
+    3. 可选并发实跑可用性探活（verify_now=True）
+    4. 批量原子写入 SQLite 并同步更新内存指纹
+    """
+    stats = {
+        "status": "ok",
+        "total_parsed": len(candidates),
+        "success_imported": 0,
+        "duplicates_skipped": 0,
+        "invalid_filtered": 0,
+        "verify_failed": 0
+    }
+    if not candidates:
+        stats["message"] = "未解析到有效候选节点"
+        return stats
+
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    pre_filtered = []
+    seen_in_batch = set()
+
+    for c in candidates:
+        ip = str(c.get('ip', '')).strip()
+        try:
+            port = int(c.get('port', 0))
+        except (ValueError, TypeError):
+            stats["invalid_filtered"] += 1
+            continue
+
+        proto = str(c.get('protocol', 'socks5')).lower().strip()
+        if proto not in ('socks5', 'http', 'https'):
+            proto = 'socks5'
+
+        # 门禁 1: IPv4 有效性、反 X 节点、端口 1~65535
+        if not ip or 'x' in ip.lower() or not is_valid_ipv4(ip) or not (1 <= port <= 65535):
+            stats["invalid_filtered"] += 1
+            continue
+
+        fp_proto = f"{proto}://{ip}:{port}"
+        fp_raw = f"{ip}:{port}"
+
+        # 批次内自去重
+        if fp_proto in seen_in_batch or fp_raw in seen_in_batch:
+            stats["duplicates_skipped"] += 1
+            continue
+        seen_in_batch.add(fp_proto)
+        seen_in_batch.add(fp_raw)
+
+        # 门禁 2: 内存指纹库去重
+        with data_lock:
+            if fp_proto in seen_fingerprints or fp_raw in seen_fingerprints:
+                stats["duplicates_skipped"] += 1
+                continue
+
+        pre_filtered.append({
+            "protocol": proto,
+            "ip": ip,
+            "port": port,
+            "location": str(c.get('location') or '人工导入').strip(),
+            "tags": str(c.get('tags') or '[自定义]').strip()
+        })
+
+    if not pre_filtered:
+        stats["message"] = f"解析出 {stats['total_parsed']} 条，其中 {stats['duplicates_skipped']} 条重复，{stats['invalid_filtered']} 条非法"
+        return stats
+
+    # 可选并发探活
+    survivors = []
+    if verify_now:
+        log(f"[批量导入] 正在对 {len(pre_filtered)} 个候选节点执行即时可用性验证...")
+        workers = min(max_verify_workers, max(1, len(pre_filtered)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_node = {
+                executor.submit(verify_proxy_candidate, item['protocol'], item['ip'], item['port'], PROBE_TIMEOUT): item
+                for item in pre_filtered
+            }
+            for future in concurrent.futures.as_completed(future_to_node):
+                node_item = future_to_node[future]
+                try:
+                    if future.result():
+                        survivors.append(node_item)
+                    else:
+                        stats["verify_failed"] += 1
+                except Exception:
+                    stats["verify_failed"] += 1
+    else:
+        survivors = pre_filtered
+
+    if not survivors:
+        stats["message"] = f"验证完成，候选节点均未通过存活测试 (失败 {stats['verify_failed']} 个)"
+        return stats
+
+    # 批量入库
+    insert_rows = [
+        (s['protocol'], s['ip'], s['port'], s['location'], s['tags'], now_str, now_str, 'active')
+        for s in survivors
+    ]
+
+    with data_lock:
+        try:
+            with get_db() as conn:
+                cur = conn.executemany("""
+                    INSERT OR IGNORE INTO proxies 
+                    (protocol, ip, port, location, tags, entry_time, last_check_time, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """, insert_rows)
+                conn.commit()
+
+                # 将入库成功的节点加入内存指纹
+                actual_inserted = 0
+                for s in survivors:
+                    fp_p = f"{s['protocol']}://{s['ip']}:{s['port']}"
+                    fp_r = f"{s['ip']}:{s['port']}"
+                    seen_fingerprints.add(fp_p)
+                    seen_fingerprints.add(fp_r)
+                    actual_inserted += 1
+
+                stats["success_imported"] = cur.rowcount if cur.rowcount >= 0 else actual_inserted
+                stats["duplicates_skipped"] += (len(survivors) - stats["success_imported"])
+                service_stats["total_captured"] += stats["success_imported"]
+        except Exception as e:
+            log(f"[批量导入写入异常] {e}")
+            stats["status"] = "error"
+            stats["message"] = f"数据库写入异常: {e}"
+            return stats
+
+    stats["message"] = f"成功导入 {stats['success_imported']} 个节点，跳过 {stats['duplicates_skipped']} 个重复节点，过滤 {stats['invalid_filtered']} 个无效节点"
+    if verify_now:
+        stats["message"] += f"，探活未通过 {stats['verify_failed']} 个"
+    log(f"[批量导入] {stats['message']}")
+    return stats
+
+
+def export_proxies_data(export_fmt: str = "csv", proto_filter: str = "all", status_filter: str = "all", raw: bool = False, keyword: str = ""):
+    """
+    全量/条件检索数据库并导出为指定格式内容 (CSV / JSON / TXT / DETAIL / SQLITE)
+    返回元组: (bytes_content, content_type, filename)
+    """
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    export_fmt = (export_fmt or "csv").lower().strip()
+
+    # 特殊分支：SQLite 数据库快照备份
+    if export_fmt in ('sqlite', 'db'):
+        with get_db() as src_conn:
+            dest_conn = sqlite3.connect(":memory:")
+            src_conn.backup(dest_conn)
+            db_bytes = dest_conn.serialize()
+            filename = f"proxies_backup_{ts}.db"
+            return db_bytes, "application/octet-stream", filename
+
+    # SQL 条件检索
+    with get_db() as conn:
+        where_clauses = []
+        params_list = []
+        if proto_filter and proto_filter.lower() not in ('', 'all'):
+            where_clauses.append("protocol = ?")
+            params_list.append(proto_filter.lower())
+        if status_filter and status_filter.lower() not in ('', 'all'):
+            where_clauses.append("status = ?")
+            params_list.append(status_filter.lower())
+        if keyword:
+            where_clauses.append("(protocol LIKE ? OR ip LIKE ? OR CAST(port AS TEXT) LIKE ? OR location LIKE ? OR tags LIKE ?)")
+            kw_arg = f"%{keyword.strip()}%"
+            params_list.extend([kw_arg, kw_arg, kw_arg, kw_arg, kw_arg])
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        rows = conn.execute(f"""
+            SELECT id, protocol, ip, port, location, tags, entry_time, last_check_time, status, latency_ms, fail_count 
+            FROM proxies {where_sql} ORDER BY entry_time DESC;
+        """, params_list).fetchall()
+
+    if export_fmt == 'json':
+        proxies_out = []
+        for r in rows:
+            p = r['protocol'].lower()
+            proxies_out.append({
+                "id": r['id'],
+                "protocol": p,
+                "ip": r['ip'],
+                "port": r['port'],
+                "url": f"{p}://{r['ip']}:{r['port']}",
+                "location": r['location'],
+                "tags": r['tags'],
+                "entry_time": r['entry_time'],
+                "last_check_time": r['last_check_time'],
+                "status": r['status'],
+                "latency_ms": r['latency_ms'],
+                "fail_count": r['fail_count']
+            })
+        payload = {
+            "status": "ok",
+            "total": len(proxies_out),
+            "exported_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "filters": {
+                "protocol": proto_filter or "all",
+                "status": status_filter or "all",
+                "keyword": keyword
+            },
+            "proxies": proxies_out
+        }
+        content = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+        return content, "application/json; charset=utf-8", f"proxies_export_{ts}.json"
+
+    elif export_fmt == 'txt':
+        lines = []
+        seen = set()
+        for r in rows:
+            line_str = f"{r['ip']}:{r['port']}" if raw else f"{r['protocol'].lower()}://{r['ip']}:{r['port']}"
+            if line_str not in seen:
+                seen.add(line_str)
+                lines.append(line_str)
+        content = "\n".join(lines).encode('utf-8')
+        return content, "text/plain; charset=utf-8", f"proxies_export_{ts}.txt"
+
+    elif export_fmt == 'detail':
+        lines = []
+        seen = set()
+        for r in rows:
+            ep = f"{r['ip']}:{r['port']}"
+            if ep not in seen:
+                seen.add(ep)
+                lines.append(f"[{r['entry_time']}] | {r['protocol'].lower()}://{r['ip']}:{r['port']} | 地区: {r['location']} | 属性: {r['tags']}")
+        content = "\n".join(lines).encode('utf-8')
+        return content, "text/plain; charset=utf-8", f"proxies_detail_export_{ts}.txt"
+
+    else:  # 默认 CSV
+        output = io.StringIO()
+        # 写入 UTF-8 BOM，方便 Windows Excel 打开不乱码
+        output.write('﻿')
+        writer = csv.writer(output)
+        writer.writerow(["id", "protocol", "ip", "port", "location", "tags", "entry_time", "last_check_time", "status", "latency_ms", "fail_count"])
+        for r in rows:
+            writer.writerow([r['id'], r['protocol'], r['ip'], r['port'], r['location'], r['tags'], r['entry_time'], r['last_check_time'], r['status'], r['latency_ms'], r['fail_count']])
+        content = output.getvalue().encode('utf-8')
+        return content, "text/csv; charset=utf-8", f"proxies_export_{ts}.csv"
+
+
+def get_db_stats() -> dict:
+    """获取 SQLite 数据库元数据、文件大小及全协议统计"""
+    with get_db() as conn:
+        total = conn.execute("SELECT COUNT(*) as cnt FROM proxies;").fetchone()['cnt']
+        active = conn.execute("SELECT COUNT(*) as cnt FROM proxies WHERE status = 'active';").fetchone()['cnt']
+        counts = {"socks5": 0, "http": 0, "https": 0}
+        for r in conn.execute("SELECT protocol, COUNT(*) as cnt FROM proxies GROUP BY protocol;").fetchall():
+            counts[r['protocol'].lower()] = r['cnt']
+
+    db_size = os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0
+    size_str = f"{db_size / 1024:.1f} KB" if db_size < 1024 * 1024 else f"{db_size / (1024 * 1024):.2f} MB"
+    return {
+        "status": "ok",
+        "db_file": DB_FILE,
+        "db_size_bytes": db_size,
+        "db_size_formatted": size_str,
+        "total_nodes": total,
+        "active_nodes": active,
+        "protocol_counts": counts,
+        "wal_mode": True
+    }
+
+
+def clear_db_records(mode: str = "failed") -> dict:
+    """清理数据库记录：'failed' 清理非 active 或失活节点，'all' 清空全量节点"""
+    global seen_fingerprints
+    with data_lock:
+        with get_db() as conn:
+            if mode == 'all':
+                cur = conn.execute("DELETE FROM proxies;")
+                conn.execute("VACUUM;")
+                deleted = cur.rowcount
+            else:
+                cur = conn.execute("DELETE FROM proxies WHERE status != 'active' OR fail_count > 0;")
+                deleted = cur.rowcount
+            conn.commit()
+
+        # 重新同步内存指纹
+        init_dedup_cache(force_sync_files=False)
+    return {
+        "status": "ok",
+        "mode": mode,
+        "deleted_count": deleted,
+        "total_remaining": service_stats["total_captured"]
+    }
+
 class ProxyHTTPHandler(BaseHTTPRequestHandler):
     """高性能多线程 HTTP API 服务与全协议现代 Web 仪表盘"""
     def log_message(self, format, *args):
@@ -835,6 +1272,65 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                 "removed_invalid": invalid
             }
             self.wfile.write(json.dumps(resp, ensure_ascii=False, indent=2).encode('utf-8'))
+        elif path == '/api/import':
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 15 * 1024 * 1024:
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": "上传内容过大，单次请小于 15MB"}, ensure_ascii=False).encode('utf-8'))
+                return
+
+            body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
+            c_type = self.headers.get('Content-Type', '')
+            raw_text = ""
+            default_proto = "socks5"
+            verify_now = False
+
+            try:
+                if 'application/json' in c_type:
+                    data = json.loads(body) if body else {}
+                    raw_text = data.get('content') or data.get('text') or ""
+                    default_proto = str(data.get('default_protocol') or data.get('protocol') or 'socks5').lower()
+                    verify_now = bool(data.get('verify_now', False))
+                    if not raw_text and ('proxies' in data or isinstance(data, list)):
+                        raw_text = json.dumps(data)
+                else:
+                    raw_text = body
+            except Exception:
+                raw_text = body
+
+            candidates = parse_import_payload(raw_text, default_proto=default_proto)
+            result = batch_import_nodes(candidates, verify_now=verify_now)
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'))
+        elif path == '/api/db/vacuum':
+            with get_db() as conn:
+                conn.execute("VACUUM;")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok", "message": "数据库整理优化已完成 (VACUUM 执行完毕)"}, ensure_ascii=False).encode('utf-8'))
+        elif path == '/api/db/clear':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
+            try:
+                data = json.loads(body) if body else {}
+            except Exception:
+                data = {}
+            mode = data.get('mode', 'failed')
+            res = clear_db_records(mode=mode)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(res, ensure_ascii=False, indent=2).encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
@@ -915,6 +1411,65 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                 "removed_invalid": invalid
             }
             self.wfile.write(json.dumps(resp, ensure_ascii=False, indent=2).encode('utf-8'))
+        elif path == '/api/import':
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 15 * 1024 * 1024:
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": "上传内容过大，单次请小于 15MB"}, ensure_ascii=False).encode('utf-8'))
+                return
+
+            body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
+            c_type = self.headers.get('Content-Type', '')
+            raw_text = ""
+            default_proto = "socks5"
+            verify_now = False
+
+            try:
+                if 'application/json' in c_type:
+                    data = json.loads(body) if body else {}
+                    raw_text = data.get('content') or data.get('text') or ""
+                    default_proto = str(data.get('default_protocol') or data.get('protocol') or 'socks5').lower()
+                    verify_now = bool(data.get('verify_now', False))
+                    if not raw_text and ('proxies' in data or isinstance(data, list)):
+                        raw_text = json.dumps(data)
+                else:
+                    raw_text = body
+            except Exception:
+                raw_text = body
+
+            candidates = parse_import_payload(raw_text, default_proto=default_proto)
+            result = batch_import_nodes(candidates, verify_now=verify_now)
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'))
+        elif path == '/api/db/vacuum':
+            with get_db() as conn:
+                conn.execute("VACUUM;")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok", "message": "数据库整理优化已完成 (VACUUM 执行完毕)"}, ensure_ascii=False).encode('utf-8'))
+        elif path == '/api/db/clear':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
+            try:
+                data = json.loads(body) if body else {}
+            except Exception:
+                data = {}
+            mode = data.get('mode', 'failed')
+            res = clear_db_records(mode=mode)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(res, ensure_ascii=False, indent=2).encode('utf-8'))
 
         # 3. JSON 格式状态统计 (/api/stats)
         elif path == '/api/stats':
@@ -954,7 +1509,11 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                     "http_nodes": "/http.txt",
                     "raw_ip_port": "/nodes.txt?raw=1",
                     "detail": "/detail.txt",
-                    "api_proxies": "/api/proxies"
+                    "api_proxies": "/api/proxies",
+                    "api_export": "/api/export",
+                    "api_import": "/api/import",
+                    "db_backup": "/api/db/backup",
+                    "db_stats": "/api/db/stats"
                 }
             }
             self.wfile.write(json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
@@ -1111,6 +1670,51 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
+
+        # 6.1 全量与条件数据导出 (/api/export - 支持 CSV / JSON / TXT / DETAIL / DB)
+        elif path == '/api/export':
+            fmt = params.get('format', ['csv'])[0].lower()
+            proto = params.get('type', params.get('proto', ['all']))[0].lower()
+            status = params.get('status', ['all'])[0].lower()
+            raw = params.get('raw', ['0'])[0] == '1'
+            kw = params.get('search', params.get('q', ['']))[0].strip()
+
+            content, content_type, filename = export_proxies_data(
+                export_fmt=fmt,
+                proto_filter=proto,
+                status_filter=status,
+                raw=raw,
+                keyword=kw
+            )
+
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            self.wfile.write(content)
+
+        # 6.2 SQLite 数据库安全快照备份下载 (/api/db/backup)
+        elif path == '/api/db/backup':
+            content, content_type, filename = export_proxies_data(export_fmt="sqlite")
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            self.wfile.write(content)
+
+        # 6.3 数据库存储状态信息 (/api/db/stats)
+        elif path == '/api/db/stats':
+            stats_info = get_db_stats()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            self.wfile.write(json.dumps(stats_info, ensure_ascii=False, indent=2).encode('utf-8'))
 
         # 6.5 未匹配的 /api/ 路径严格返回 JSON 404，绝不回退至 HTML
         elif path.startswith('/api/'):

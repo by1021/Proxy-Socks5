@@ -28,6 +28,11 @@
 6. **现代化 Glassmorphism 实时 Web 仪表盘**：
    - 极光暗黑 / 清晰白天双主题无缝切换，实时协议卡片统计、节点模糊检索、动态检测频率微调、一键复制与多格式订阅导出。
 
+7. **数据库全生命周期管理与数据导入导出体系 (NEW)**：
+   - **多格式全量导出**：摆脱前端分页限制，直接由后端按条件流式导出 **CSV 表格**（Excel通用）、**标准 JSON**、**TXT 订阅列表**、**Detail 元数据** 以及 **原生 SQLite 二进制快照 (`.db`)**。
+   - **智能批量导入流水线**：支持粘贴自由文本、带协议 URI、CSV 或 JSON 数组，自动识别协议与地址；严格走 `is_valid_ipv4`、反 X 节点质量门禁与 `seen_fingerprints` 内存指纹库去重，可选开启入库前即时连通性探活。
+   - **数据库运维自检**：提供在线热备份下载、文件大小与表状态查询、一键 `VACUUM` 磁盘压缩整理与失效节点清理。
+
 ---
 
 ## 项目目录结构
@@ -236,3 +241,9 @@ sudo journalctl -u proxy-socks5 -f
 | `http://127.0.0.1:8899/api/config` | `application/json` | 动态获取或修改检测参数（支持 `interval` 采集周期与 `timeout` 超时设置） |
 | `http://127.0.0.1:8899/api/trigger` | `application/json` | 手动触发后台立即执行一轮采集探测 |
 | `http://127.0.0.1:8899/health` | `application/json` | **健康检查探针**，返回 `{"status":"ok"}`，供 Docker / K8s 保活监测 |
+| `http://127.0.0.1:8899/api/export` | `CSV / JSON / TXT` | **全量多格式数据导出**，支持 `format` (csv/json/txt/detail/sqlite)、`proto`、`status` 条件筛选 |
+| `http://127.0.0.1:8899/api/import` | `application/json` (POST) | **节点批量导入与去重入库**，智能解析 URI/CSV/JSON，含质量门禁与可选探活 |
+| `http://127.0.0.1:8899/api/db/backup` | `application/octet-stream` | **SQLite 数据库快照备份**，在线热备份免加锁下载完整二进制 `data.db` 副本 |
+| `http://127.0.0.1:8899/api/db/stats` | `application/json` | 获取 SQLite 数据库存储大小、节点量及协议分布状态 |
+| `http://127.0.0.1:8899/api/db/vacuum` | `application/json` (POST) | 手动触发 SQLite `VACUUM;` 整理数据库磁盘空间并重建索引 |
+| `http://127.0.0.1:8899/api/db/clear` | `application/json` (POST) | 安全清理失效或失败节点记录 |
