@@ -239,8 +239,19 @@ def is_valid_ipv4(ip_str: str) -> bool:
             return False
     return True
 
-def verify_socks5(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
-    """验证 SOCKS5 代理：握手确认 + 建立转发连接"""
+PROBE_TARGET_HOST = "cp.cloudflare.com"
+PROBE_TARGET_PORT = 443
+PROBE_TARGET_HTTP_URL = "http://cp.cloudflare.com/generate_204"
+
+def is_fake_html_response(data: bytes) -> bool:
+    """检测响应报文是否包含网页特征（HTML/DOCTYPE/标签/text-html），防止普通 Web 服务器误报"""
+    low = data.lower()
+    return (b'<html' in low or b'<!doctype' in low or 
+            b'content-type: text/html' in low or b'<head' in low or b'<body' in low)
+
+def verify_socks5(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, float]:
+    """验证 SOCKS5 代理：严格握手 + 建立转发连接 + 端到端连通测试，返回 (ok, latency_ms)"""
+    t0 = time.perf_counter()
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -248,45 +259,58 @@ def verify_socks5(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
         # 1. 握手报文：VER=5, NMETHODS=1, METHOD=00(NO AUTH)
         s.sendall(b"\x05\x01\x00")
         resp = s.recv(2)
-        if resp not in (b"\x05\x00", b"\x05\x02"):
-            return False
-        # 2. 发起 CONNECT 转发请求测试
-        target = b"connectivitycheck.gstatic.com"
+        # 仅放行无需认证的公开节点 (0x05, 0x00)，排除需要账号密码认证的节点
+        if resp != b"\x05\x00":
+            return False, 0.0
+        # 2. 发起 CONNECT 转发请求测试目标 cp.cloudflare.com:80
+        target = PROBE_TARGET_HOST.encode('ascii')
         cmd = b"\x05\x01\x00\x03" + bytes([len(target)]) + target + (80).to_bytes(2, 'big')
         s.sendall(cmd)
         resp2 = s.recv(10)
-        return len(resp2) >= 2 and resp2[1] == 0
+        # 严格校验 RFC 1928: VER=5 且 REP=0 (成功)
+        if len(resp2) < 2 or resp2[0] != 5 or resp2[1] != 0:
+            return False, 0.0
+        # 3. 发送轻量 HTTP 请求验证实际透传转发有效性
+        s.sendall(b"GET /generate_204 HTTP/1.1\r\nHost: cp.cloudflare.com\r\nConnection: close\r\n\r\n")
+        resp3 = s.recv(64)
+        if resp3 and is_fake_html_response(resp3):
+            return False, 0.0
+        lat = round((time.perf_counter() - t0) * 1000.0, 1)
+        return True, lat
     except Exception:
-        return False
+        return False, 0.0
     finally:
         try:
             s.close()
         except Exception:
             pass
 
-def verify_https(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
+def verify_https(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, float]:
     """
     深度验证 HTTPS 代理：
-    模式 1：TLS 封装安全代理 (Secure Web Proxy，常见于 443 等端口)
-            建立 TLS 握手 -> 发送 CONNECT 请求 -> 精确校验 HTTP 状态行 200 或 Connection Established
-    模式 2：标准明文 CONNECT 隧道代理 (支持透传转发 HTTPS 流量)
+    模式 1：标准明文 CONNECT 隧道代理 (优先向 443 发起，兼容 Squid 策略，并通过 TLS 握手透传校验)
+    模式 2：TLS 封装安全代理 (Secure Web Proxy，对代理节点本身建立 TLS 握手)
+    返回 (ok, latency_ms)
     """
-    # 模式 1：TLS 封装代理
+    # 模式 1：标准明文 CONNECT 隧道 (优先测试 443 端口，杜绝 Squid 等非 SSL 端口 403 拦截)
+    t0 = time.perf_counter()
     s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s1.settimeout(timeout)
     try:
         s1.connect((ip, port))
-        try:
-            ss = ssl_ctx.wrap_socket(s1, server_hostname=None)
-            ss.settimeout(timeout)
-            ss.sendall(b"CONNECT httpbin.org:80 HTTP/1.1\r\nHost: httpbin.org:80\r\n\r\n")
-            resp = ss.recv(128)
-            ss.close()
-            # 精确比对首行状态码 200，杜绝 404/500 等由于响应头含数字 200 产生的误报
-            if re.match(rb"^HTTP/1\.[01]\s+200\b", resp) or b"connection established" in resp.lower():
-                return True
-        except Exception:
-            pass
+        s1.sendall(f"CONNECT {PROBE_TARGET_HOST}:443 HTTP/1.1\r\nHost: {PROBE_TARGET_HOST}:443\r\n\r\n".encode('ascii'))
+        resp = s1.recv(256)
+        if (re.match(rb"^HTTP/1\.[01]\s+200\b", resp) or b"connection established" in resp.lower()) and not is_fake_html_response(resp):
+            try:
+                ss = ssl_ctx.wrap_socket(s1, server_hostname=PROBE_TARGET_HOST)
+                ss.settimeout(timeout)
+                lat = round((time.perf_counter() - t0) * 1000.0, 1)
+                ss.close()
+                return True, lat
+            except Exception:
+                if b'<html' not in resp.lower():
+                    lat = round((time.perf_counter() - t0) * 1000.0, 1)
+                    return True, lat
     except Exception:
         pass
     finally:
@@ -295,36 +319,57 @@ def verify_https(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
         except Exception:
             pass
 
-    # 模式 2：标准明文 CONNECT 隧道
-    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s2.settimeout(timeout)
-    try:
-        s2.connect((ip, port))
-        s2.sendall(b"CONNECT httpbin.org:80 HTTP/1.1\r\nHost: httpbin.org:80\r\n\r\n")
-        resp2 = s2.recv(128)
-        if re.match(rb"^HTTP/1\.[01]\s+200\b", resp2) or b"connection established" in resp2.lower():
-            return True
-    except Exception:
-        pass
-    finally:
+    # 模式 2：TLS 封装代理 (仅当节点运行在 443 端口或模式 1 失败时尝试)
+    if port == 443:
+        t1 = time.perf_counter()
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s2.settimeout(timeout)
         try:
-            s2.close()
+            s2.connect((ip, port))
+            ss2 = ssl_ctx.wrap_socket(s2, server_hostname=None)
+            ss2.settimeout(timeout)
+            ss2.sendall(f"CONNECT {PROBE_TARGET_HOST}:443 HTTP/1.1\r\nHost: {PROBE_TARGET_HOST}:443\r\n\r\n".encode('ascii'))
+            resp2 = ss2.recv(256)
+            ss2.close()
+            if (re.match(rb"^HTTP/1\.[01]\s+200\b", resp2) or b"connection established" in resp2.lower()) and not is_fake_html_response(resp2):
+                lat = round((time.perf_counter() - t1) * 1000.0, 1)
+                return True, lat
         except Exception:
             pass
+        finally:
+            try:
+                s2.close()
+            except Exception:
+                pass
 
-    return False
+    return False, 0.0
 
-def verify_http(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
-    """验证 HTTP 代理：CONNECT 隧道方法 或 正向 GET 代理请求"""
-    # 方法 1：测试 CONNECT 隧道
+def verify_http(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, float]:
+    """
+    验证 HTTP 代理：
+    方法 1：测试 CONNECT 隧道 (向 443 发起，并坚决排除返回 200 HTML 网页的普通 Web 服务)
+    方法 2：正向 GET 代理请求 (严格校验 204 No Content，绝不接受 200 OK 或 HTML 响应)
+    返回 (ok, latency_ms)
+    """
+    # 方法 1：测试 CONNECT 隧道 (独立计时)
+    t0 = time.perf_counter()
     s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s1.settimeout(timeout)
     try:
         s1.connect((ip, port))
-        s1.sendall(b"CONNECT httpbin.org:80 HTTP/1.1\r\nHost: httpbin.org:80\r\n\r\n")
-        resp = s1.recv(128)
-        if re.match(rb"^HTTP/1\.[01]\s+200\b", resp) or b"connection established" in resp.lower():
-            return True
+        s1.sendall(f"CONNECT {PROBE_TARGET_HOST}:443 HTTP/1.1\r\nHost: {PROBE_TARGET_HOST}:443\r\n\r\n".encode('ascii'))
+        resp = s1.recv(256)
+        if (re.match(rb"^HTTP/1\.[01]\s+200\b", resp) or b"connection established" in resp.lower()) and not is_fake_html_response(resp):
+            try:
+                ss = ssl_ctx.wrap_socket(s1, server_hostname=PROBE_TARGET_HOST)
+                ss.settimeout(timeout)
+                lat = round((time.perf_counter() - t0) * 1000.0, 1)
+                ss.close()
+                return True, lat
+            except Exception:
+                if b'<html' not in resp.lower():
+                    lat = round((time.perf_counter() - t0) * 1000.0, 1)
+                    return True, lat
     except Exception:
         pass
     finally:
@@ -333,33 +378,58 @@ def verify_http(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
         except Exception:
             pass
 
-    # 方法 2：正向 GET 代理请求
+    # 方法 2：正向 GET 代理请求 (重置计时器，避免叠加方法 1 的失败耗时)
+    t1 = time.perf_counter()
     s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s2.settimeout(timeout)
     try:
         s2.connect((ip, port))
-        req = b"GET http://connectivitycheck.gstatic.com/generate_204 HTTP/1.1\r\nHost: connectivitycheck.gstatic.com\r\nConnection: close\r\n\r\n"
+        req = b"GET http://cp.cloudflare.com/generate_204 HTTP/1.1\r\nHost: cp.cloudflare.com\r\nConnection: close\r\n\r\n"
         s2.sendall(req)
-        resp2 = s2.recv(128)
-        if re.match(rb"^HTTP/1\.[01]\s+(200|204)\b", resp2):
-            return True
+        resp2 = s2.recv(512)
+        # 严格校验：状态码必须为 204 No Content，严禁接受 200 OK，严禁包含 HTML 标签
+        if re.match(rb"^HTTP/1\.[01]\s+204\b", resp2) and not is_fake_html_response(resp2):
+            lat = round((time.perf_counter() - t1) * 1000.0, 1)
+            return True, lat
     except Exception:
         pass
     finally:
         try:
             s2.close()
+        except Exception:
+            pass
+
+    # 方法 2 备用：若 Cloudflare 异常，向 gstatic 发起备用正向 GET 探测
+    t2 = time.perf_counter()
+    s3 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s3.settimeout(timeout)
+    try:
+        s3.connect((ip, port))
+        req2 = b"GET http://connectivitycheck.gstatic.com/generate_204 HTTP/1.1\r\nHost: connectivitycheck.gstatic.com\r\nConnection: close\r\n\r\n"
+        s3.sendall(req2)
+        resp3 = s3.recv(512)
+        # 同样严格校验 204 No Content
+        if re.match(rb"^HTTP/1\.[01]\s+204\b", resp3) and not is_fake_html_response(resp3):
+            lat = round((time.perf_counter() - t2) * 1000.0, 1)
+            return True, lat
+    except Exception:
+        pass
+    finally:
+        try:
+            s3.close()
         except Exception:
             pass
 
     # 若端口为 443，额外尝试 HTTPS 握手
     if port == 443:
-        if verify_https(ip, port, timeout):
-            return True
+        ok, lat = verify_https(ip, port, timeout)
+        if ok:
+            return True, lat
 
-    return False
+    return False, 0.0
 
-def verify_proxy_candidate(proto: str, ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
-    """按协议分发真实可用性验证"""
+def verify_proxy_candidate(proto: str, ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, float]:
+    """按协议分发真实可用性验证，返回 (ok, latency_ms)"""
     if proto == 'socks5':
         return verify_socks5(ip, port, timeout)
     elif proto == 'https':
@@ -368,10 +438,8 @@ def verify_proxy_candidate(proto: str, ip: str, port: int, timeout: float = PROB
 
 def verify_proxy_with_timing(proto: str, ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, float]:
     """带实测 RTT 毫秒延迟的可用性验证，返回 (ok, latency_ms)"""
-    t0 = time.perf_counter()
-    ok = verify_proxy_candidate(proto, ip, port, timeout)
-    lat = round((time.perf_counter() - t0) * 1000.0, 1) if ok else 0.0
-    return (ok, lat)
+    return verify_proxy_candidate(proto, ip, port, timeout)
+
 
 def unmask_and_verify(proto: str, masked_ip: str, port: int) -> tuple[str, float] | None:
     """
