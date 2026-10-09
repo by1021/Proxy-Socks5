@@ -31,6 +31,7 @@ import io
 import signal
 import gzip
 import base64
+import contextlib
 
 # 适配 Windows 控制台 UTF-8 输出
 try:
@@ -212,6 +213,7 @@ service_stats = {
     "poll_round": 0,
     "is_busy": False,
     "is_health_checking": False,
+    "next_poll_timestamp": 0,
     "last_message": "服务已初始化，等待轮询采集与健康体检",
     "health_stats": {}
 }
@@ -298,6 +300,14 @@ def verify_https(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bo
     s1.settimeout(timeout)
     try:
         s1.connect((ip, port))
+    except Exception:
+        try:
+            s1.close()
+        except Exception:
+            pass
+        return False, 0.0
+
+    try:
         s1.sendall(f"CONNECT {PROBE_TARGET_HOST}:443 HTTP/1.1\r\nHost: {PROBE_TARGET_HOST}:443\r\n\r\n".encode('ascii'))
         resp = s1.recv(256)
         if (re.match(rb"^HTTP/1\.[01]\s+200\b", resp) or b"connection established" in resp.lower()) and not is_fake_html_response(resp):
@@ -357,6 +367,14 @@ def verify_http(ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[boo
     s1.settimeout(timeout)
     try:
         s1.connect((ip, port))
+    except Exception:
+        try:
+            s1.close()
+        except Exception:
+            pass
+        return False, 0.0
+
+    try:
         s1.sendall(f"CONNECT {PROBE_TARGET_HOST}:443 HTTP/1.1\r\nHost: {PROBE_TARGET_HOST}:443\r\n\r\n".encode('ascii'))
         resp = s1.recv(256)
         if (re.match(rb"^HTTP/1\.[01]\s+200\b", resp) or b"connection established" in resp.lower()) and not is_fake_html_response(resp):
@@ -462,24 +480,30 @@ def unmask_and_verify(proto: str, masked_ip: str, port: int) -> tuple[str, float
         def probe_candidate(candidate_ip):
             if stop_event.is_set():
                 return None, 0.0
-            ok, lat = verify_proxy_with_timing(proto, candidate_ip, port, timeout=PROBE_TIMEOUT)
+            ok, lat = verify_proxy_with_timing(proto, candidate_ip, port, timeout=min(PROBE_TIMEOUT, 1.5))
             if ok and not stop_event.is_set():
                 stop_event.set()
                 return candidate_ip, lat
             return None, 0.0
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS) as ex:
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS)
+        try:
             futures = [ex.submit(probe_candidate, f"{prefix}.{c}.{suffix}") for c in range(256)]
             for fut in concurrent.futures.as_completed(futures):
                 try:
                     res = fut.result()
                     if res and res[0]:
                         found_ip, found_lat = res
-                        for rem in futures:
-                            rem.cancel()
+                        stop_event.set()
+                        ex.shutdown(wait=False, cancel_futures=True)
                         break
                 except Exception:
                     pass
+        finally:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
 
         if found_ip and is_valid_ipv4(found_ip):
             return found_ip, found_lat
@@ -493,20 +517,27 @@ def unmask_and_verify(proto: str, masked_ip: str, port: int) -> tuple[str, float
 
 
 # ==================== SQLite 本地数据库核心层 ====================
+@contextlib.contextmanager
 def get_db():
-    """获取配置了 WAL 模式与行字典的 SQLite 数据库连接"""
+    """获取配置了 WAL 模式与行字典的 SQLite 数据库连接，离开上下文时自动安全释放"""
     db_dir = os.path.dirname(os.path.abspath(DB_FILE))
     if db_dir and not os.path.exists(db_dir):
         try:
             os.makedirs(db_dir, exist_ok=True)
         except Exception:
             pass
-    conn = sqlite3.connect(DB_FILE, timeout=10.0)
+    conn = sqlite3.connect(DB_FILE, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 8000;")
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 def init_db():
     """初始化数据库表与索引，若为空则自动无缝迁移 detail.txt / nodes.txt 历史合法数据"""
@@ -822,7 +853,7 @@ def process_node(node: dict):
     raw_ip = node['ip']
     port = node['port']
     protocol = node['protocol'].lower()
-    row_key = f"{protocol}:{raw_ip}:{port}:{node['entry_time']}"
+    row_key = f"{protocol}:{raw_ip}:{port}"
 
     now = time.time()
     with data_lock:
@@ -889,7 +920,7 @@ def run_collection_cycle():
 
             if 'X' not in n['ip'] and 'x' not in n['ip'] and (fp_proto in seen_fingerprints or fp_raw in seen_fingerprints):
                 continue
-            row_key = f"{n['protocol']}:{n['ip']}:{n['port']}:{n['entry_time']}"
+            row_key = f"{n['protocol']}:{n['ip']}:{n['port']}"
             with data_lock:
                 if row_key in masked_cache:
                     cached_res, ctime = masked_cache[row_key]
@@ -931,6 +962,7 @@ def monitor_loop():
             run_collection_cycle()
         except Exception as e:
             log(f"[监控线程异常] {e}")
+        service_stats["next_poll_timestamp"] = int(time.time() + POLL_INTERVAL)
         poll_event.wait(POLL_INTERVAL)
         poll_event.clear()
 
@@ -1600,9 +1632,12 @@ def export_proxies_data(export_fmt: str = "csv", proto_filter: str = "all", stat
     if export_fmt in ('sqlite', 'db'):
         with get_db() as src_conn:
             dest_conn = sqlite3.connect(":memory:")
-            src_conn.backup(dest_conn)
-            db_bytes = dest_conn.serialize()
-            return db_bytes, "application/octet-stream", f"proxies_backup_{ts}.db"
+            try:
+                src_conn.backup(dest_conn)
+                db_bytes = dest_conn.serialize()
+                return db_bytes, "application/octet-stream", f"proxies_backup_{ts}.db"
+            finally:
+                dest_conn.close()
 
     with get_db() as conn:
         where_clauses = ["ip NOT LIKE '%X%'", "ip NOT LIKE '%x%'"]
@@ -1763,7 +1798,7 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
     def send_bytes(self, content: bytes, content_type: str = "text/plain; charset=utf-8", status_code: int = 200, extra_headers: dict = None):
         """统一高性能响应发送：支持智能 Gzip 压缩、严格 Content-Length 与 Keep-Alive 声明"""
         accept_encoding = self.headers.get("Accept-Encoding", "")
-        skip_gzip_paths = ['/nodes.txt', '/socks5.txt', '/https.txt', '/http.txt']
+        skip_gzip_paths = ['/nodes.txt', '/all_nodes.txt', '/nodes_all.txt', '/all.txt', '/socks5.txt', '/https.txt', '/http.txt']
         req_path = getattr(self, 'path', '').split('?')[0]
         use_gzip = "gzip" in accept_encoding and len(content) > 512 and (req_path not in skip_gzip_paths)
 
@@ -1861,7 +1896,6 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
 
         elif path == '/api/health_check':
             health_check_event.set()
-            threading.Thread(target=run_health_check_cycle, daemon=True).start()
             self.send_json({"status": "ok", "message": "已触发全量节点存活健康复检与低延迟测速"})
 
         elif path == '/api/dedup':
@@ -1926,15 +1960,19 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
         path = parsed.path
         params = urllib.parse.parse_qs(parsed.query)
 
-        # 1. 纯代理节点文本接口 (/nodes.txt, /proxies.txt, /https.txt, /socks5.txt, /http.txt)
-        if path in ['/nodes.txt', '/proxies.txt', '/https.txt', '/socks5.txt', '/http.txt']:
+        # 1. 纯代理节点文本接口 (/nodes.txt, /all_nodes.txt, /proxies.txt, /https.txt, /socks5.txt, /http.txt)
+        if path in ['/nodes.txt', '/all_nodes.txt', '/nodes_all.txt', '/all.txt', '/proxies.txt', '/https.txt', '/socks5.txt', '/http.txt']:
             raw_mode = params.get('raw', ['0'])[0] == '1'
             proto_filter = params.get('type', params.get('proto', ['']))[0].lower()
             if path == '/https.txt': proto_filter = 'https'
             elif path == '/socks5.txt': proto_filter = 'socks5'
             elif path == '/http.txt': proto_filter = 'http'
 
-            alive_param = params.get('alive', ['1'])[0]
+            is_all_path = path in ('/all_nodes.txt', '/nodes_all.txt', '/all.txt')
+            alive_param = params.get('alive', params.get('status', ['all' if is_all_path else '1']))[0]
+            if params.get('all', ['0'])[0] == '1':
+                alive_param = 'all'
+
             status_filter = 'all' if alive_param in ('0', 'all', 'false') else 'active'
             sort_by = params.get('sort', ['latency'])[0].lower()
             b64_mode = params.get('b64', ['0'])[0] == '1'
@@ -2020,9 +2058,12 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                 "upstream_proxy": UPSTREAM_PROXY,
                 "last_poll_timestamp": service_stats["last_poll_timestamp"],
                 "health_stats": service_stats.get("health_stats", {}),
+                "next_poll_timestamp": service_stats.get("next_poll_timestamp", 0),
                 "last_message": service_stats["last_message"],
                 "endpoints": {
-                    "all_nodes": "/nodes.txt",
+                    "active_nodes": "/nodes.txt",
+                    "all_nodes": "/all_nodes.txt",
+                    "all_nodes_raw": "/all_nodes.txt?raw=1",
                     "https_nodes": "/https.txt",
                     "socks5_nodes": "/socks5.txt",
                     "http_nodes": "/http.txt",
@@ -2172,7 +2213,6 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
         # 8. 触发即时全量健康体检与测速 (/api/health_check)
         elif path == '/api/health_check':
             health_check_event.set()
-            threading.Thread(target=run_health_check_cycle, daemon=True).start()
             self.send_json({"status": "ok", "message": "已触发全量节点健康检查与低延迟测速"})
 
         # 9. 健康检查探针 (/health)
@@ -2282,13 +2322,14 @@ def main():
         pass
 
     log(f"HTTP API 服务已就绪，正在监听: http://{API_HOST}:{API_PORT}")
-    log(f"  [1] 全部纯节点接口:   http://localhost:{API_PORT}/nodes.txt")
-    log(f"  [2] 专属 HTTPS 接口:  http://localhost:{API_PORT}/https.txt")
-    log(f"  [3] 专属 SOCKS5 接口: http://localhost:{API_PORT}/socks5.txt")
-    log(f"  [4] 专属 HTTP 接口:   http://localhost:{API_PORT}/http.txt")
-    log(f"  [5] 状态统计接口:     http://localhost:{API_PORT}/api/stats")
-    log(f"  [6] 健康检查探针:     http://localhost:{API_PORT}/health")
-    log(f"  [7] 现代化仪表盘首页: http://localhost:{API_PORT}/")
+    log(f"  [1] 全部有效节点接口: http://localhost:{API_PORT}/nodes.txt")
+    log(f"  [2] 全量总节点接口:   http://localhost:{API_PORT}/all_nodes.txt")
+    log(f"  [3] 专属 HTTPS 接口:  http://localhost:{API_PORT}/https.txt")
+    log(f"  [4] 专属 SOCKS5 接口: http://localhost:{API_PORT}/socks5.txt")
+    log(f"  [5] 专属 HTTP 接口:   http://localhost:{API_PORT}/http.txt")
+    log(f"  [6] 状态统计接口:     http://localhost:{API_PORT}/api/stats")
+    log(f"  [7] 健康检查探针:     http://localhost:{API_PORT}/health")
+    log(f"  [8] 现代化仪表盘首页: http://localhost:{API_PORT}/")
     log("=" * 70)
 
     try:

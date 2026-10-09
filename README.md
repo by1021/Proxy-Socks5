@@ -232,7 +232,8 @@ sudo journalctl -u proxy-socks5 -f
 | 端点 | 响应格式 | 核心说明 |
 | :--- | :--- | :--- |
 | `http://127.0.0.1:8899/` | `text/html` | 现代化 Glassmorphism 实时交互仪表盘 |
-| `http://127.0.0.1:8899/nodes.txt` | `text/plain` | 纯代理列表，格式为 `protocol://ip:port`，支持直接作为代理源订阅 |
+| `http://127.0.0.1:8899/nodes.txt` | `text/plain` | **有效代理列表（仅存活活跃）**，格式为 `protocol://ip:port`，支持直接作为代理源订阅 |
+| `http://127.0.0.1:8899/all_nodes.txt` | `text/plain` | **全量总节点列表（包含有效与离线）**，格式为 `protocol://ip:port`，支持 `?raw=1` 纯 IP:端口 |
 | `http://127.0.0.1:8899/https.txt` | `text/plain` | **专属 HTTPS 代理端点**，仅输出严格通过 TLS 校验的真实 HTTPS 节点 |
 | `http://127.0.0.1:8899/socks5.txt` | `text/plain` | **专属 SOCKS5 代理端点**，仅输出 SOCKS5 节点 |
 | `http://127.0.0.1:8899/http.txt` | `text/plain` | **专属 HTTP 代理端点**，仅输出 HTTP 节点 |

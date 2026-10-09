@@ -1458,8 +1458,8 @@
                 </div>
                 <div class="api-item">
                     <div class="api-title-row">
-                        <span class="api-name">🌟 全部有效代理列表</span>
-                        <span class="ver-badge">标准格式</span>
+                        <span class="api-name">🌟 有效代理订阅列表 (仅存活活跃)</span>
+                        <span class="ver-badge" style="background:rgba(16,185,129,0.15);color:#10b981;">仅有效</span>
                     </div>
                     <div class="api-url">
                         <a href="/nodes.txt" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/nodes.txt</code></a>
@@ -1468,7 +1468,22 @@
                             <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/nodes.txt')">复制</button>
                         </div>
                     </div>
-                    <div class="api-desc">格式：<code>protocol://ip:port</code>，支持直接作为代理池订阅源或爬虫轮询。</div>
+                    <div class="api-desc">格式：<code>protocol://ip:port</code>，默认仅输出通过真实连通性测试的有效存活节点，支持作为纯代理订阅源。</div>
+                </div>
+
+                <div class="api-item">
+                    <div class="api-title-row">
+                        <span class="api-name">🌐 全量总节点列表 (NEW · 包含有效与离线)</span>
+                        <span class="ver-badge" style="background:rgba(59,130,246,0.15);color:#3b82f6;">全量库</span>
+                    </div>
+                    <div class="api-url">
+                        <a href="/all_nodes.txt" target="_blank" class="api-code-link" title="点击直接打开跳转"><code>/all_nodes.txt</code></a>
+                        <div class="api-actions">
+                            <a href="/all_nodes.txt" target="_blank" class="action-icon-btn action-jump-btn" title="在新标签页中打开跳转">跳转 ↗</a>
+                            <button class="action-icon-btn" title="复制链接地址" onclick="copyText(window.location.origin + '/all_nodes.txt')">复制</button>
+                        </div>
+                    </div>
+                    <div class="api-desc">格式：<code>protocol://ip:port</code>，输出数据库中的全量节点（包含当前离线与有效节点），支持 <code>?raw=1</code> 仅输出 IP:PORT。</div>
                 </div>
 
                 <div class="api-item">
@@ -1775,6 +1790,9 @@ http://45.140.146.12:8080
         let currentSearch = '';
         let pollIntervalSec = 60;
         let lastPollTimestamp = 0;
+        let nextPollTimestamp = 0;
+        let isPollingBusy = false;
+        let isHealthChecking = false;
         let countdownTimer = null;
         let currentPage = 1;
         let pageSize = 25;
@@ -1986,11 +2004,28 @@ http://45.140.146.12:8080
             const intervalElem = document.getElementById('stat-interval-info');
             if (!intervalElem) return;
 
-            if (lastPollTimestamp > 0 && pollIntervalSec > 0) {
+            if (isPollingBusy) {
+                intervalElem.innerHTML = `周期: ${pollIntervalSec}s/轮 · <span style="color:#3b82f6;font-weight:600;">⚡ 正在采集中...</span>`;
+                return;
+            }
+
+            if (nextPollTimestamp > 0) {
+                const nowSec = Math.floor(Date.now() / 1000);
+                const remain = Math.max(0, nextPollTimestamp - nowSec);
+                if (remain > 0) {
+                    intervalElem.innerText = `周期: ${pollIntervalSec}s/轮 · 倒计时: ${remain}s`;
+                } else {
+                    intervalElem.innerHTML = `周期: ${pollIntervalSec}s/轮 · <span style="color:#f59e0b;font-weight:600;">⏳ 即将开始...</span>`;
+                }
+            } else if (lastPollTimestamp > 0 && pollIntervalSec > 0) {
                 const nowSec = Math.floor(Date.now() / 1000);
                 const elapsed = nowSec - lastPollTimestamp;
                 const remain = Math.max(0, pollIntervalSec - elapsed);
-                intervalElem.innerText = `周期: ${pollIntervalSec}s/轮 · 倒计时: ${remain}s`;
+                if (remain > 0) {
+                    intervalElem.innerText = `周期: ${pollIntervalSec}s/轮 · 倒计时: ${remain}s`;
+                } else {
+                    intervalElem.innerHTML = `周期: ${pollIntervalSec}s/轮 · <span style="color:#f59e0b;font-weight:600;">⏳ 即将开始...</span>`;
+                }
             } else {
                 intervalElem.innerText = `周期: ${pollIntervalSec}s/轮 · 等待初始轮询`;
             }
@@ -2312,6 +2347,8 @@ http://45.140.146.12:8080
             const btn = document.getElementById('btn-trigger');
             btn.disabled = true;
             btn.innerHTML = '<span>⏳</span> 触发中...';
+            isPollingBusy = true;
+            updateCountdown();
             fetch('/api/trigger')
                 .then(r => r.json())
                 .then(data => {
@@ -2397,6 +2434,15 @@ http://45.140.146.12:8080
                 }
                 if (statsData.last_poll_timestamp) {
                     lastPollTimestamp = statsData.last_poll_timestamp;
+                }
+                if (statsData.next_poll_timestamp) {
+                    nextPollTimestamp = statsData.next_poll_timestamp;
+                }
+                if (statsData.is_busy !== undefined) {
+                    isPollingBusy = !!statsData.is_busy;
+                }
+                if (statsData.is_health_checking !== undefined) {
+                    isHealthChecking = !!statsData.is_health_checking;
                 }
                 if (statsData.is_health_checking) {
                     document.getElementById('service-status-text').innerText = '正在执行全量测速体检...';
