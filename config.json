@@ -3,8 +3,10 @@
   "api_port": 8899,
   "poll_interval": 60,
   "probe_timeout": 1.8,
-  "probe_workers": 96,
-  "node_concurrency": 5,
+  "probe_workers": 48,
+  "node_concurrency": 3,
+  "health_check_interval": 60,
+  "upstream_proxy": "",
   "target_url": "https://proxy-socks5.com/proxy_list",
   "db_file": "data.db"
 }

@@ -817,6 +817,39 @@
         .empty-state { padding: 40px 20px; text-align: center; color: var(--text-dim); }
         .empty-icon { font-size: 40px; margin-bottom: 10px; }
 
+                /* 延迟与连通状态标签 */
+        .latency-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            font-family: monospace;
+            white-space: nowrap;
+        }
+        .latency-pill.fast {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.35);
+        }
+        .latency-pill.med {
+            background: rgba(245, 158, 11, 0.15);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.35);
+        }
+        .latency-pill.slow {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.35);
+        }
+        .latency-pill.dead {
+            background: rgba(148, 163, 184, 0.15);
+            color: #94a3b8;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+        }
+
         /* ================= 移动端 / 响应式适配优化 ================= */
         @media (min-width: 641px) and (max-width: 992px) {
             body {
@@ -1248,6 +1281,9 @@
                     <span class="pulse-dot"></span>
                     <span id="service-status-text">系统监控运行中</span>
                 </div>
+                <button class="btn btn-secondary" id="btn-health" onclick="triggerHealthCheck()" title="对全库节点进行真实协议可用性复检与低延迟测速">
+                    <span>🚀</span> 测速体检
+                </button>
                 <button class="btn btn-primary" id="btn-trigger" onclick="triggerImmediatePoll()">
                     <span>🔄</span> 立即采集检测
                 </button>
@@ -1274,6 +1310,11 @@
                 <div class="stat-head"><span>HTTP 代理</span><span>🌍</span></div>
                 <div class="stat-value" id="stat-http">0</div>
                 <div class="stat-desc">CONNECT / GET 真实穿透已通</div>
+            </div>
+            <div class="stat-card" style="cursor: pointer;" onclick="triggerHealthCheck()">
+                <div class="stat-head"><span>平均延迟 (Ping)</span><span>📶</span></div>
+                <div class="stat-value" id="stat-avg-lat" style="color: #10b981;">--</div>
+                <div class="stat-desc" id="stat-min-lat-desc">最低: <span id="stat-min-lat" style="font-weight:600;">--</span> ms · 低延迟优先</div>
             </div>
             <div class="stat-card monitor" onclick="openSettingsModal()">
                 <div class="stat-head"><span>轮询状态与时间</span><span>⏱️</span></div>
@@ -1318,15 +1359,16 @@
                     <thead>
                         <tr>
                             <th style="width: 110px;">协议类型</th>
-                            <th style="width: 260px;">真实节点地址 (真实IP:端口)</th>
+                            <th style="width: 240px;">真实节点地址 (真实IP:端口)</th>
+                            <th style="width: 120px;">延迟 / 状态</th>
                             <th>归属国家 / 地区</th>
-                            <th style="width: 180px;">属性标签</th>
+                            <th style="width: 160px;">属性标签</th>
                             <th style="width: 160px;">入库发现时间</th>
                             <th style="width: 140px; text-align: right;">快捷操作</th>
                         </tr>
                     </thead>
                     <tbody id="proxy-tbody">
-                        <tr><td colspan="6" class="empty-state"><div class="empty-icon">⏳</div>正在加载已验证节点数据...</td></tr>
+                        <tr><td colspan="7" class="empty-state"><div class="empty-icon">⏳</div>正在加载已验证节点数据...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -2027,7 +2069,7 @@ http://45.140.146.12:8080
             }
 
             if (!list || totalCount === 0) {
-                tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><div class="empty-icon">📭</div>没有找到符合条件的节点</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="empty-state"><div class="empty-icon">📭</div>没有找到符合条件的节点</td></tr>`;
                 if (rangeInfoElem) rangeInfoElem.innerText = '暂无数据';
                 updatePaginationControls(0, 1);
                 return;
@@ -2050,6 +2092,18 @@ http://45.140.146.12:8080
                 const fullUrl = `${p.protocol}://${p.ip}:${p.port}`;
                 const rawUrl = `${p.ip}:${p.port}`;
 
+                let latBadge = '';
+                if (p.status === 'dead') {
+                    latBadge = '<span class="latency-pill dead">⚠️ 离线</span>';
+                } else if (p.latency_ms && p.latency_ms > 0) {
+                    const lat = Math.round(p.latency_ms);
+                    const cls = lat < 500 ? 'fast' : (lat < 1500 ? 'med' : 'slow');
+                    const iconLat = lat < 500 ? '⚡' : (lat < 1500 ? '📶' : '🐢');
+                    latBadge = `<span class="latency-pill ${cls}">${iconLat} ${lat}ms</span>`;
+                } else {
+                    latBadge = '<span class="latency-pill med">🟢 活跃</span>';
+                }
+
                 html += `
                 <tr>
                     <td>
@@ -2061,6 +2115,9 @@ http://45.140.146.12:8080
                         <span class="host-cell" title="点击快速复制" onclick="copyText('${fullUrl}')">
                             ${p.ip}:<span style="color:#facc15;">${p.port}</span>
                         </span>
+                    </td>
+                    <td>
+                        ${latBadge}
                     </td>
                     <td>
                         <span style="color:var(--text-muted); margin-right:4px;">📍</span>${p.location || '未知'}
@@ -2255,50 +2312,86 @@ http://45.140.146.12:8080
                 });
         }
 
+        let isDataLoading = false;
         function loadData() {
-            fetch('/api/proxies')
+            if (isDataLoading) return;
+            isDataLoading = true;
+            Promise.all([
+                fetch('/api/proxies?status=active&sort=latency').then(r => r.json()),
+                fetch('/api/stats').then(r => r.json())
+            ]).then(([proxiesData, statsData]) => {
+                allProxies = proxiesData.proxies || [];
+                const counts = proxiesData.protocol_counts || {};
+
+                const activeCount = proxiesData.active_total !== undefined ? proxiesData.active_total : allProxies.length;
+                document.getElementById('stat-total').innerText = activeCount;
+                document.getElementById('stat-https').innerText = counts.https || 0;
+                document.getElementById('stat-socks5').innerText = counts.socks5 || 0;
+                document.getElementById('stat-http').innerText = counts.http || 0;
+
+                const avgLatElem = document.getElementById('stat-avg-lat');
+                if (avgLatElem) avgLatElem.innerText = statsData.avg_latency_ms ? `${statsData.avg_latency_ms}ms` : '--';
+                const minLatElem = document.getElementById('stat-min-lat');
+                if (minLatElem) minLatElem.innerText = statsData.min_latency_ms ? statsData.min_latency_ms : '--';
+
+                document.getElementById('badge-all').innerText = proxiesData.total || allProxies.length;
+                document.getElementById('badge-https').innerText = counts.https || 0;
+                document.getElementById('badge-socks5').innerText = counts.socks5 || 0;
+                document.getElementById('badge-http').innerText = counts.http || 0;
+
+                if (statsData.poll_round !== undefined) {
+                    document.getElementById('stat-round').innerText = `第 ${statsData.poll_round} 轮`;
+                }
+                if (statsData.last_poll_time) {
+                    document.getElementById('stat-last-time').innerText = `采集: ${statsData.last_poll_time}`;
+                }
+                if (statsData.poll_interval_sec) {
+                    pollIntervalSec = statsData.poll_interval_sec;
+                }
+                if (statsData.last_poll_timestamp) {
+                    lastPollTimestamp = statsData.last_poll_timestamp;
+                }
+                if (statsData.is_health_checking) {
+                    document.getElementById('service-status-text').innerText = '正在执行全量测速体检...';
+                } else if (statsData.is_busy) {
+                    document.getElementById('service-status-text').innerText = '正在执行探测扫描...';
+                } else {
+                    document.getElementById('service-status-text').innerText = '系统监控运行中';
+                }
+                updateCountdown();
+                renderTable(false);
+            }).catch(e => {
+                console.error('加载数据异常', e);
+            }).finally(() => {
+                isDataLoading = false;
+            });
+        }
+
+
+        function triggerHealthCheck() {
+            const btn = document.getElementById('btn-health');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span>⏳</span> 测速中...';
+            }
+            fetch('/api/health_check', { method: 'POST' })
                 .then(r => r.json())
                 .then(data => {
-                    allProxies = data.proxies || [];
-                    const counts = data.protocol_counts || {};
-
-                    document.getElementById('stat-total').innerText = data.total || 0;
-                    document.getElementById('stat-https').innerText = counts.https || 0;
-                    document.getElementById('stat-socks5').innerText = counts.socks5 || 0;
-                    document.getElementById('stat-http').innerText = counts.http || 0;
-
-                    document.getElementById('badge-all').innerText = data.total || 0;
-                    document.getElementById('badge-https').innerText = counts.https || 0;
-                    document.getElementById('badge-socks5').innerText = counts.socks5 || 0;
-                    document.getElementById('badge-http').innerText = counts.http || 0;
-
-                    renderTable(false);
+                    showToast('🚀 已触发全量节点存活健康复检与测速，后台正在加速探测！');
+                    setTimeout(loadData, 3000);
+                    setTimeout(loadData, 8000);
                 })
-                .catch(e => console.error('加载代理列表失败', e));
-
-            fetch('/api/stats')
-                .then(r => r.json())
-                .then(data => {
-                    if (data.poll_round !== undefined) {
-                        document.getElementById('stat-round').innerText = `第 ${data.poll_round} 轮`;
-                    }
-                    if (data.last_poll_time) {
-                        document.getElementById('stat-last-time').innerText = `最近: ${data.last_poll_time}`;
-                    }
-                    if (data.poll_interval_sec) {
-                        pollIntervalSec = data.poll_interval_sec;
-                    }
-                    if (data.last_poll_timestamp) {
-                        lastPollTimestamp = data.last_poll_timestamp;
-                    }
-                    if (data.is_busy) {
-                        document.getElementById('service-status-text').innerText = '正在执行探测扫描...';
-                    } else {
-                        document.getElementById('service-status-text').innerText = '系统监控运行中';
-                    }
-                    updateCountdown();
+                .catch(err => {
+                    showToast('测速触发失败: ' + err, false);
                 })
-                .catch(e => console.error('加载状态统计失败', e));
+                .finally(() => {
+                    setTimeout(() => {
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.innerHTML = '<span>🚀</span> 测速体检';
+                        }
+                    }, 4000);
+                });
         }
 
         // ================= 数据导入模态框与逻辑 =================

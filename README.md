@@ -221,6 +221,8 @@ sudo journalctl -u proxy-socks5 -f
 | `PROXY_PROBE_TIMEOUT` | `1.8` | `2.0` | 节点可用性探测超时 (秒) |
 | `PROXY_PROBE_WORKERS` | `96` | `128` | C 段批量并发扫描探测线程数 |
 | `PROXY_NODE_CONCURRENCY` | `5` | `10` | 节点并发处理数 |
+| `PROXY_HEALTH_CHECK_INTERVAL` | `60` | `60` | 存量节点全量健康体检与测速周期 (秒) |
+| `PROXY_UPSTREAM_PROXY` | `""` | `http://127.0.0.1:10808` | 访问源站的上游代理 (可选，为空时自动探测) |
 | `PROXY_DB_FILE` | `data.db` | `/app/data/data.db` | SQLite 数据库存储绝对或相对路径 |
 
 ---
@@ -230,7 +232,7 @@ sudo journalctl -u proxy-socks5 -f
 | 端点 | 响应格式 | 核心说明 |
 | :--- | :--- | :--- |
 | `http://127.0.0.1:8899/` | `text/html` | 现代化 Glassmorphism 实时交互仪表盘 |
-| `http://127.0.0.1:8899/nodes.txt` | `text/plain` | 纯代理列表，格式为 `protocol://ip:port`，支持直接订阅、Clash/V2Ray 等 |
+| `http://127.0.0.1:8899/nodes.txt` | `text/plain` | 纯代理列表，格式为 `protocol://ip:port`，支持直接作为代理源订阅 |
 | `http://127.0.0.1:8899/https.txt` | `text/plain` | **专属 HTTPS 代理端点**，仅输出严格通过 TLS 校验的真实 HTTPS 节点 |
 | `http://127.0.0.1:8899/socks5.txt` | `text/plain` | **专属 SOCKS5 代理端点**，仅输出 SOCKS5 节点 |
 | `http://127.0.0.1:8899/http.txt` | `text/plain` | **专属 HTTP 代理端点**，仅输出 HTTP 节点 |

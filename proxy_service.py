@@ -29,6 +29,8 @@ import sqlite3
 import csv
 import io
 import signal
+import gzip
+import base64
 
 # 适配 Windows 控制台 UTF-8 输出
 try:
@@ -46,9 +48,11 @@ DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")  #
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
 TARGET_URL = "https://proxy-socks5.com/proxy_list"
 POLL_INTERVAL = 60                   # 轮询采集周期 (秒)
-PROBE_WORKERS = 96                   # C段单节点探测并发线程数
+PROBE_WORKERS = 48                   # C段单节点探测并发线程数 (削峰优化，防套接字风暴)
 PROBE_TIMEOUT = 1.8                  # 协议检测单次超时 (秒)
-NODE_CONCURRENCY = 5                 # 同时并发处理的目标节点数
+NODE_CONCURRENCY = 3                 # 同时并发处理的目标节点数
+HEALTH_CHECK_INTERVAL = 60           # 存量节点健康检查与测速周期 (秒)
+UPSTREAM_PROXY = ""                  # 上游代理 (例如 http://127.0.0.1:10808，为空时自动探测)
 # ==================================================
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -60,13 +64,15 @@ DEFAULT_CONFIG = {
     "probe_timeout": PROBE_TIMEOUT,
     "probe_workers": PROBE_WORKERS,
     "node_concurrency": NODE_CONCURRENCY,
+    "health_check_interval": HEALTH_CHECK_INTERVAL,
+    "upstream_proxy": UPSTREAM_PROXY,
     "target_url": TARGET_URL,
     "db_file": "data.db"
 }
 
 def load_config() -> dict:
     """从 config.json 加载持久化配置，若不存在则使用预设默认值并自动创建"""
-    global POLL_INTERVAL, PROBE_TIMEOUT, PROBE_WORKERS, NODE_CONCURRENCY, API_HOST, API_PORT, DB_FILE
+    global POLL_INTERVAL, PROBE_TIMEOUT, PROBE_WORKERS, NODE_CONCURRENCY, API_HOST, API_PORT, DB_FILE, HEALTH_CHECK_INTERVAL, UPSTREAM_PROXY
     cfg = DEFAULT_CONFIG.copy()
     if os.path.exists(CONFIG_FILE):
         try:
@@ -78,6 +84,8 @@ def load_config() -> dict:
                     PROBE_TIMEOUT = float(cfg.get('probe_timeout', PROBE_TIMEOUT))
                     PROBE_WORKERS = int(cfg.get('probe_workers', PROBE_WORKERS))
                     NODE_CONCURRENCY = int(cfg.get('node_concurrency', NODE_CONCURRENCY))
+                    HEALTH_CHECK_INTERVAL = int(cfg.get('health_check_interval', HEALTH_CHECK_INTERVAL))
+                    UPSTREAM_PROXY = str(cfg.get('upstream_proxy', UPSTREAM_PROXY)).strip()
                     API_HOST = str(cfg.get('api_host', API_HOST))
                     API_PORT = int(cfg.get('api_port', API_PORT))
                     
@@ -120,6 +128,13 @@ def load_config() -> dict:
                     NODE_CONCURRENCY = int(os.getenv("PROXY_NODE_CONCURRENCY"))
                 except ValueError:
                     pass
+            if os.getenv("PROXY_HEALTH_CHECK_INTERVAL"):
+                try:
+                    HEALTH_CHECK_INTERVAL = int(os.getenv("PROXY_HEALTH_CHECK_INTERVAL"))
+                except ValueError:
+                    pass
+            if os.getenv("PROXY_UPSTREAM_PROXY"):
+                UPSTREAM_PROXY = os.getenv("PROXY_UPSTREAM_PROXY").strip()
             if os.getenv("PROXY_TARGET_URL"):
                 TARGET_URL = os.getenv("PROXY_TARGET_URL")
             if os.getenv("PROXY_DB_FILE"):
@@ -139,7 +154,7 @@ def load_config() -> dict:
 
 def save_config(cfg: dict = None) -> bool:
     """将当前内存配置持久化写入 config.json 文件"""
-    global POLL_INTERVAL, PROBE_TIMEOUT, PROBE_WORKERS, NODE_CONCURRENCY, API_HOST, API_PORT, DB_FILE
+    global POLL_INTERVAL, PROBE_TIMEOUT, PROBE_WORKERS, NODE_CONCURRENCY, API_HOST, API_PORT, DB_FILE, HEALTH_CHECK_INTERVAL, UPSTREAM_PROXY
     if cfg is None:
         cfg = DEFAULT_CONFIG.copy()
         if os.path.exists(CONFIG_FILE):
@@ -154,6 +169,8 @@ def save_config(cfg: dict = None) -> bool:
         cfg["probe_timeout"] = PROBE_TIMEOUT
         cfg["probe_workers"] = PROBE_WORKERS
         cfg["node_concurrency"] = NODE_CONCURRENCY
+        cfg["health_check_interval"] = HEALTH_CHECK_INTERVAL
+        cfg["upstream_proxy"] = UPSTREAM_PROXY
         cfg["api_host"] = API_HOST
         cfg["api_port"] = API_PORT
         if "db_file" not in cfg or (os.path.isabs(str(cfg.get("db_file", ""))) and os.path.basename(str(cfg.get("db_file", ""))) == "data.db"):
@@ -179,16 +196,24 @@ seen_fingerprints = set()
 masked_cache = {}                    # 缓存已探测结果，避免周期内重复无效探测
 data_lock = threading.Lock()
 poll_event = threading.Event()
+health_check_event = threading.Event()
 is_polling_active = False
+is_health_checking = False
 
 service_stats = {
     "total_captured": 0,
+    "active_count": 0,
+    "dead_count": 0,
+    "avg_latency_ms": 0.0,
+    "min_latency_ms": 0.0,
     "last_poll_time": "尚未轮询",
     "last_poll_timestamp": 0,
     "start_time": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     "poll_round": 0,
     "is_busy": False,
-    "last_message": "服务已初始化，等待轮询采集"
+    "is_health_checking": False,
+    "last_message": "服务已初始化，等待轮询采集与健康体检",
+    "health_stats": {}
 }
 
 def log(msg: str):
@@ -341,12 +366,19 @@ def verify_proxy_candidate(proto: str, ip: str, port: int, timeout: float = PROB
         return verify_https(ip, port, timeout)
     return verify_http(ip, port, timeout)
 
-def unmask_and_verify(proto: str, masked_ip: str, port: int) -> str | None:
+def verify_proxy_with_timing(proto: str, ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, float]:
+    """带实测 RTT 毫秒延迟的可用性验证，返回 (ok, latency_ms)"""
+    t0 = time.perf_counter()
+    ok = verify_proxy_candidate(proto, ip, port, timeout)
+    lat = round((time.perf_counter() - t0) * 1000.0, 1) if ok else 0.0
+    return (ok, lat)
+
+def unmask_and_verify(proto: str, masked_ip: str, port: int) -> tuple[str, float] | None:
     """
     对目标 IP 进行真实地址探测与协议可用性双重验证：
-    1. 若包含 X 掩码：并发测试 0~255 C 段候选，仅当协议校验通过时返回真实 IP。
-    2. 若不含 X：直接进行协议校验，通过则返回，失败则返回 None。
-    3. 若未能找到真实可用 IP，一律返回 None，严禁返回包含 X 的伪节点。
+    - 针对包含 X 掩码的 C 段节点进行并发实测，秒级还原真实 IP；
+    - 加入 stop_event 早停机制，首个通畅 IP 命中后立即取消剩余探测，避免套接字风暴；
+    - 返回 (real_ip, latency_ms)，失败返回 None。
     """
     parts = masked_ip.split('.')
     if len(parts) != 4:
@@ -355,26 +387,40 @@ def unmask_and_verify(proto: str, masked_ip: str, port: int) -> str | None:
     if 'X' in parts[2] or 'x' in parts[2]:
         prefix = f"{parts[0]}.{parts[1]}"
         suffix = parts[3]
+        found_ip = None
+        found_lat = 0.0
+        stop_event = threading.Event()
+
+        def probe_candidate(candidate_ip):
+            if stop_event.is_set():
+                return None, 0.0
+            ok, lat = verify_proxy_with_timing(proto, candidate_ip, port, timeout=PROBE_TIMEOUT)
+            if ok and not stop_event.is_set():
+                stop_event.set()
+                return candidate_ip, lat
+            return None, 0.0
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS) as ex:
-            futures = {
-                ex.submit(verify_proxy_candidate, proto, f"{prefix}.{c}.{suffix}", port, PROBE_TIMEOUT): f"{prefix}.{c}.{suffix}"
-                for c in range(256)
-            }
+            futures = [ex.submit(probe_candidate, f"{prefix}.{c}.{suffix}") for c in range(256)]
             for fut in concurrent.futures.as_completed(futures):
                 try:
-                    if fut.result():
-                        real_ip = futures[fut]
-                        if is_valid_ipv4(real_ip):
-                            for rem in futures:
-                                rem.cancel()
-                            return real_ip
+                    res = fut.result()
+                    if res and res[0]:
+                        found_ip, found_lat = res
+                        for rem in futures:
+                            rem.cancel()
+                        break
                 except Exception:
                     pass
+
+        if found_ip and is_valid_ipv4(found_ip):
+            return found_ip, found_lat
         return None
     else:
-        if is_valid_ipv4(masked_ip) and verify_proxy_candidate(proto, masked_ip, port, timeout=PROBE_TIMEOUT):
-            return masked_ip
+        if is_valid_ipv4(masked_ip):
+            ok, lat = verify_proxy_with_timing(proto, masked_ip, port, timeout=PROBE_TIMEOUT)
+            if ok:
+                return masked_ip, lat
         return None
 
 
@@ -416,6 +462,7 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_proto ON proxies(protocol);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_time ON proxies(entry_time DESC);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_status ON proxies(status);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_latency ON proxies(latency_ms ASC);")
 
         # 检查是否需要从现有 detail.txt 自动迁移历史数据
         cursor = conn.execute("SELECT COUNT(*) AS cnt FROM proxies;")
@@ -450,31 +497,57 @@ def sync_disk_files_from_db(conn=None):
     """（已废弃磁盘文件导出，直接由 SQLite 数据库对外提供实时订阅查询）"""
     pass
 
-def read_all_proxies_from_disk():
-    """从 SQLite 数据库高效读取结构化代理列表与协议统计"""
+def read_all_proxies_from_disk(proto_filter="", status_filter="active", sort_by="latency"):
+    """
+    从 SQLite 数据库高效读取结构化代理列表与全维度统计
+    默认过滤离线失效节点 (status='active')，并按真实延迟由低到高升序排列
+    """
     proxies_list = []
-    counts = {"total": 0, "socks5": 0, "http": 0, "https": 0}
+    counts = {"total": 0, "active": 0, "dead": 0, "socks5": 0, "http": 0, "https": 0, "avg_latency": 0.0, "min_latency": 0.0}
 
     try:
         with get_db() as conn:
-            cur = conn.execute("SELECT protocol, COUNT(*) as cnt FROM proxies GROUP BY protocol;")
+            cur = conn.execute("SELECT status, protocol, COUNT(*) as cnt FROM proxies GROUP BY status, protocol;")
             for r in cur.fetchall():
-                p = r['protocol'].lower()
-                c = r['cnt']
-                counts[p] = c
-                counts['total'] += c
-
-            rows = conn.execute("SELECT entry_time, protocol, ip, port, location, tags, status, latency_ms FROM proxies ORDER BY entry_time DESC;").fetchall()
-            for r in rows:
+                st = r['status'].lower()
                 proto = r['protocol'].lower()
-                ip = r['ip']
-                port = r['port']
+                c = r['cnt']
+                counts['total'] += c
+                if st == 'active':
+                    counts['active'] += c
+                    counts[proto] = counts.get(proto, 0) + c
+                else:
+                    counts['dead'] += c
+
+            lat_row = conn.execute("SELECT AVG(latency_ms) as avg_lat, MIN(latency_ms) as min_lat FROM proxies WHERE status='active' AND latency_ms > 0;").fetchone()
+            if lat_row and lat_row['avg_lat'] is not None:
+                counts['avg_latency'] = round(lat_row['avg_lat'], 1)
+                counts['min_latency'] = round(lat_row['min_lat'], 1)
+
+            where_clauses = ["ip NOT LIKE '%X%'", "ip NOT LIKE '%x%'"]
+            params = []
+            if proto_filter and proto_filter.lower() not in ('', 'all'):
+                where_clauses.append("protocol = ?")
+                params.append(proto_filter.lower())
+            if status_filter and status_filter.lower() not in ('', 'all'):
+                where_clauses.append("status = ?")
+                params.append(status_filter.lower())
+
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+            if sort_by == 'latency':
+                order_sql = "ORDER BY (CASE WHEN latency_ms > 0 THEN latency_ms ELSE 99999 END) ASC, entry_time DESC"
+            else:
+                order_sql = "ORDER BY entry_time DESC"
+
+            rows = conn.execute(f"SELECT entry_time, protocol, ip, port, location, tags, status, latency_ms FROM proxies {where_sql} {order_sql};", params).fetchall()
+            for r in rows:
+                p_proto = r['protocol'].lower()
                 proxies_list.append({
                     "entry_time": r['entry_time'],
-                    "protocol": proto,
-                    "ip": ip,
-                    "port": port,
-                    "url": f"{proto}://{ip}:{port}",
+                    "protocol": p_proto,
+                    "ip": r['ip'],
+                    "port": r['port'],
+                    "url": f"{p_proto}://{r['ip']}:{r['port']}",
                     "location": r['location'],
                     "tags": r['tags'],
                     "status": r['status'],
@@ -511,6 +584,27 @@ def init_dedup_cache(force_sync_files: bool = True):
             return len(rows), 0, 0
 # ==============================================================
 
+def get_upstream_opener():
+    """获取访问目标源站的上游代理 opener，支持自动侦测本地常用代理"""
+    proxy_url = UPSTREAM_PROXY
+    if not proxy_url:
+        for candidate in ["http://127.0.0.1:10808", "http://127.0.0.1:10809", "http://127.0.0.1:7890"]:
+            try:
+                p_parts = urllib.parse.urlparse(candidate)
+                s = socket.socket()
+                s.settimeout(0.12)
+                s.connect((p_parts.hostname, p_parts.port))
+                s.close()
+                proxy_url = candidate
+                break
+            except Exception:
+                pass
+
+    if proxy_url:
+        handler = urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url})
+        return urllib.request.build_opener(handler), proxy_url
+    return urllib.request.build_opener(), None
+
 def fetch_latest_proxies():
     """从目标网站抓取最新展示的代理列表元数据 (覆盖 SOCKS5 / HTTP / HTTPS 全协议)"""
     headers = {
@@ -518,9 +612,21 @@ def fetch_latest_proxies():
         "Referer": "https://proxy-socks5.com/"
     }
     req = urllib.request.Request(TARGET_URL, headers=headers)
-    html = urllib.request.urlopen(req, timeout=15).read().decode('utf-8', errors='ignore')
-    soup = bs4.BeautifulSoup(html, 'html.parser')
+    
+    html = None
+    opener, proxy_used = get_upstream_opener()
+    try:
+        html = opener.open(req, timeout=12).read().decode('utf-8', errors='ignore')
+    except Exception as e1:
+        if proxy_used:
+            try:
+                html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8', errors='ignore')
+            except Exception as e2:
+                raise RuntimeError(f"代理抓取失败 ({e1}) 且直连失败 ({e2})")
+        else:
+            raise e1
 
+    soup = bs4.BeautifulSoup(html, 'html.parser')
     rows = soup.select('table tbody tr') or soup.select('table tr')[1:]
     proxies = []
     current_year = datetime.datetime.now().year
@@ -580,12 +686,7 @@ def fetch_latest_proxies():
     return proxies
 
 def save_single_node(node: dict) -> bool:
-    """
-    流式安全落盘单个已验证节点至 SQLite 本地数据库及兼容文本文件
-    【核心门禁】：
-    1. 严格禁止任何包含 X 或非合规 IPv4 写入！
-    2. 严格执行重复节点检测（引擎级 UNIQUE 约束 + 内存指纹库拦截），绝不写入重复信息！
-    """
+    """流式安全落盘单个已验证节点至 SQLite 本地数据库，严格记录实测延迟"""
     ip = str(node.get('ip', '')).strip()
     try:
         port = int(node.get('port', 0))
@@ -595,39 +696,34 @@ def save_single_node(node: dict) -> bool:
     if protocol not in ('socks5', 'http', 'https'):
         protocol = 'socks5'
 
-    # 1. 基础有效性与防 X 门禁
     if not ip or 'X' in ip or 'x' in ip or not is_valid_ipv4(ip) or not (1 <= port <= 65535):
         log(f"[门禁拦截] 发现非法或含掩码节点，坚决拒绝写入: {protocol}://{ip}:{port}")
         return False
 
     fp_proto = f"{protocol}://{ip}:{port}"
     fp_raw = f"{ip}:{port}"
+    latency_ms = float(node.get('latency_ms', 0.0) or 0.0)
+    entry_time = node.get('entry_time') or datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    location = node.get('location') or '未知地区'
+    tags = node.get('tags') or '[机房]'
 
     with data_lock:
-        # 2. 内存指纹库预拦截
-        if fp_proto in seen_fingerprints or fp_raw in seen_fingerprints:
-            log(f"[去重拦截] 检测到重复节点信息，拒绝写入: {fp_proto}")
-            return False
-
-        # 3. 数据库引擎级原子落盘与唯一性约束保证 (UNIQUE(ip, port))
-        entry_time = node.get('entry_time') or datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        location = node.get('location') or '未知地区'
-        tags = node.get('tags') or '[机房]'
-
         try:
             with get_db() as conn:
-                cur = conn.execute("""
-                    INSERT OR IGNORE INTO proxies 
-                    (protocol, ip, port, location, tags, entry_time, last_check_time, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active');
-                """, (protocol, ip, port, location, tags, entry_time, entry_time))
+                conn.execute("""
+                    INSERT INTO proxies 
+                    (protocol, ip, port, location, tags, entry_time, last_check_time, status, latency_ms, fail_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, 0)
+                    ON CONFLICT(ip, port) DO UPDATE SET
+                        protocol = excluded.protocol,
+                        location = CASE WHEN excluded.location != '未知地区' AND excluded.location != '' THEN excluded.location ELSE proxies.location END,
+                        tags = CASE WHEN excluded.tags != '[机房]' AND excluded.tags != '' THEN excluded.tags ELSE proxies.tags END,
+                        last_check_time = excluded.last_check_time,
+                        status = 'active',
+                        latency_ms = excluded.latency_ms,
+                        fail_count = 0;
+                """, (protocol, ip, port, location, tags, entry_time, entry_time, latency_ms))
                 conn.commit()
-
-                if cur.rowcount <= 0:
-                    seen_fingerprints.add(fp_proto)
-                    seen_fingerprints.add(fp_raw)
-                    log(f"[数据库去重拦截] 节点已存在于 SQLite 数据库，拒绝重复写入: {fp_proto}")
-                    return False
         except Exception as e:
             log(f"[数据库写入异常] {e}")
             return False
@@ -636,16 +732,11 @@ def save_single_node(node: dict) -> bool:
         seen_fingerprints.add(fp_raw)
         service_stats["total_captured"] += 1
 
-    log(f"[+ 成功收录入库] {fp_proto} | 地区: {location} | 属性: {tags} | 库中总数: {service_stats['total_captured']}")
+    log(f"[+ 成功收录入库] {fp_proto} | 延迟: {latency_ms}ms | 地区: {location} | 属性: {tags}")
     return True
 
 def process_node(node: dict):
-    """
-    单个节点处理流水线：
-    1. 提取并核验基础信息
-    2. C 段并发探测真实 IP + 协议级实跑深度验证
-    3. 校验合格后去重并落盘，未还原/不可用/重复节点直接废弃，杜绝写入重复信息
-    """
+    """单个节点处理流水线：C 段并发早停探测真实 IP + 实测可用性与延迟"""
     raw_ip = node['ip']
     port = node['port']
     protocol = node['protocol'].lower()
@@ -654,29 +745,33 @@ def process_node(node: dict):
     now = time.time()
     with data_lock:
         if row_key in masked_cache:
-            cached_ip, cache_time = masked_cache[row_key]
-            if cached_ip is None and (now - cache_time < 600):
+            cached_res, cache_time = masked_cache[row_key]
+            if cached_res is None and (now - cache_time < 600):
                 return None
-            if cached_ip and (f"{protocol}://{cached_ip}:{port}" in seen_fingerprints or f"{cached_ip}:{port}" in seen_fingerprints):
+            if cached_res and (f"{protocol}://{cached_res[0]}:{port}" in seen_fingerprints or f"{cached_res[0]}:{port}" in seen_fingerprints):
                 return None
 
-    real_ip = unmask_and_verify(protocol, raw_ip, port)
-
+    res = unmask_and_verify(protocol, raw_ip, port)
     with data_lock:
-        masked_cache[row_key] = (real_ip, now)
+        masked_cache[row_key] = (res, now)
 
-    if not real_ip or 'X' in real_ip or 'x' in real_ip or not is_valid_ipv4(real_ip):
+    if not res:
         log(f"[- 舍弃节点] 未能探测出可用真实 IP 或协议不可用: {protocol}://{raw_ip}:{port}")
         return None
 
+    real_ip, lat_ms = res
+    if not is_valid_ipv4(real_ip):
+        return None
+
     node['ip'] = real_ip
+    node['latency_ms'] = lat_ms
     fp_proto = f"{protocol}://{real_ip}:{port}"
     fp_raw = f"{real_ip}:{port}"
 
     with data_lock:
         if fp_proto in seen_fingerprints or fp_raw in seen_fingerprints:
-            log(f"[去重拦截] 还原出的真实节点已在库中，跳过收录: {fp_proto}")
-            return None
+            save_single_node(node)
+            return node
 
     if save_single_node(node):
         return node
@@ -753,6 +848,97 @@ def monitor_loop():
         poll_event.wait(POLL_INTERVAL)
         poll_event.clear()
 
+# ==================== 全量节点健康体检与低延迟测速引擎 ====================
+def run_health_check_cycle():
+    """
+    全量存量节点健康检查与低延迟真实测速：
+    1. 从数据库读取节点进行全协议真实连接与 RTT 测速
+    2. 存活节点刷新 latency_ms、last_check_time 并标记为 'active'
+    3. 离线节点递增 fail_count，达到阈值标记为 'dead'
+    4. 彻底解决客户端导入后因死节点导致的卡顿与超时问题
+    """
+    global is_health_checking
+    with data_lock:
+        if is_health_checking:
+            return
+        is_health_checking = True
+        service_stats["is_health_checking"] = True
+
+    try:
+        with get_db() as conn:
+            rows = conn.execute("SELECT id, protocol, ip, port, status, fail_count FROM proxies;").fetchall()
+
+        if not rows:
+            return
+
+        log(f"[健康测速] 开始对全库 {len(rows)} 个节点执行可用性与低延迟测速...")
+        t0 = time.time()
+
+        def test_one_node(r):
+            nid, proto, ip, port = r['id'], r['protocol'], r['ip'], r['port']
+            ok, lat = verify_proxy_with_timing(proto, ip, port, timeout=PROBE_TIMEOUT)
+            return nid, ok, lat
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(48, len(rows))) as ex:
+            results = list(ex.map(test_one_node, rows))
+
+        alive_cnt = 0
+        dead_cnt = 0
+        lats = []
+        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        with get_db() as conn:
+            for nid, ok, lat in results:
+                if ok:
+                    alive_cnt += 1
+                    lats.append(lat)
+                    conn.execute("""
+                        UPDATE proxies 
+                        SET status = 'active', latency_ms = ?, last_check_time = ?, fail_count = 0
+                        WHERE id = ?;
+                    """, (lat, now_str, nid))
+                else:
+                    dead_cnt += 1
+                    conn.execute("""
+                        UPDATE proxies 
+                        SET status = 'dead', latency_ms = 0.0, fail_count = fail_count + 1, last_check_time = ?
+                        WHERE id = ?;
+                    """, (now_str, nid))
+            conn.commit()
+
+        elapsed = round(time.time() - t0, 2)
+        avg_lat = round(sum(lats) / len(lats), 1) if lats else 0.0
+        min_lat = min(lats) if lats else 0.0
+
+        service_stats["active_count"] = alive_cnt
+        service_stats["dead_count"] = dead_cnt
+        service_stats["avg_latency_ms"] = avg_lat
+        service_stats["min_latency_ms"] = min_lat
+        service_stats["health_stats"] = {
+            "last_check_time": now_str,
+            "total_tested": len(rows),
+            "alive_count": alive_cnt,
+            "dead_count": dead_cnt,
+            "min_latency_ms": min_lat,
+            "avg_latency_ms": avg_lat,
+            "elapsed_sec": elapsed
+        }
+        log(f"[健康测速完成] 耗时 {elapsed}s | 存活: {alive_cnt} 个, 离线: {dead_cnt} 个 | 最低延迟: {min_lat}ms, 平均延迟: {avg_lat}ms")
+    except Exception as e:
+        log(f"[健康测速异常] {e}")
+    finally:
+        with data_lock:
+            is_health_checking = False
+            service_stats["is_health_checking"] = False
+
+def health_check_loop():
+    """后台独立健康体检与低延迟测速循环线程"""
+    global HEALTH_CHECK_INTERVAL
+    time.sleep(2)
+    while True:
+        run_health_check_cycle()
+        health_check_event.wait(HEALTH_CHECK_INTERVAL)
+        health_check_event.clear()
 
 # ==================== 数据导入导出与数据库增强引擎 ====================
 _ip_location_cache = {}
@@ -808,12 +994,7 @@ def resolve_ip_location(ip: str) -> tuple[str, str]:
     return (loc, tag)
 
 
-def verify_proxy_with_timing(proto: str, ip: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, float]:
-    """带实测延迟的可用性验证，返回 (ok, latency_ms)"""
-    t0 = time.perf_counter()
-    ok = verify_proxy_candidate(proto, ip, port, timeout)
-    lat = round((time.perf_counter() - t0) * 1000.0, 1) if ok else 0.0
-    return (ok, lat)
+
 
 
 def parse_import_payload(raw_content: str, default_proto: str = "socks5") -> list:
@@ -1323,25 +1504,19 @@ def batch_import_nodes(candidates: list, verify_now: bool = False, max_verify_wo
 
 
 def export_proxies_data(export_fmt: str = "csv", proto_filter: str = "all", status_filter: str = "all", raw: bool = False, keyword: str = ""):
-    """
-    全量/条件检索数据库并导出为指定格式内容 (CSV / JSON / TXT / DETAIL / SQLITE)
-    返回元组: (bytes_content, content_type, filename)
-    """
+    """全量/条件检索数据库并导出为指定格式内容 (CSV / JSON / TXT / DETAIL / SQLITE)"""
     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     export_fmt = (export_fmt or "csv").lower().strip()
 
-    # 特殊分支：SQLite 数据库快照备份
     if export_fmt in ('sqlite', 'db'):
         with get_db() as src_conn:
             dest_conn = sqlite3.connect(":memory:")
             src_conn.backup(dest_conn)
             db_bytes = dest_conn.serialize()
-            filename = f"proxies_backup_{ts}.db"
-            return db_bytes, "application/octet-stream", filename
+            return db_bytes, "application/octet-stream", f"proxies_backup_{ts}.db"
 
-    # SQL 条件检索
     with get_db() as conn:
-        where_clauses = []
+        where_clauses = ["ip NOT LIKE '%X%'", "ip NOT LIKE '%x%'"]
         params_list = []
         if proto_filter and proto_filter.lower() not in ('', 'all'):
             where_clauses.append("protocol = ?")
@@ -1357,7 +1532,8 @@ def export_proxies_data(export_fmt: str = "csv", proto_filter: str = "all", stat
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         rows = conn.execute(f"""
             SELECT id, protocol, ip, port, location, tags, entry_time, last_check_time, status, latency_ms, fail_count 
-            FROM proxies {where_sql} ORDER BY entry_time DESC;
+            FROM proxies {where_sql} 
+            ORDER BY (CASE WHEN latency_ms > 0 THEN latency_ms ELSE 99999 END) ASC, entry_time DESC;
         """, params_list).fetchall()
 
     if export_fmt == 'json':
@@ -1428,13 +1604,15 @@ def export_proxies_data(export_fmt: str = "csv", proto_filter: str = "all", stat
 
 
 def get_db_stats() -> dict:
-    """获取 SQLite 数据库元数据、文件大小及全协议统计"""
+    """获取 SQLite 数据库元数据、文件大小及全维度统计"""
     with get_db() as conn:
         total = conn.execute("SELECT COUNT(*) as cnt FROM proxies;").fetchone()['cnt']
         active = conn.execute("SELECT COUNT(*) as cnt FROM proxies WHERE status = 'active';").fetchone()['cnt']
+        dead = total - active
         counts = {"socks5": 0, "http": 0, "https": 0}
-        for r in conn.execute("SELECT protocol, COUNT(*) as cnt FROM proxies GROUP BY protocol;").fetchall():
+        for r in conn.execute("SELECT protocol, COUNT(*) as cnt FROM proxies WHERE status = 'active' GROUP BY protocol;").fetchall():
             counts[r['protocol'].lower()] = r['cnt']
+        lat_row = conn.execute("SELECT AVG(latency_ms) as avg_lat, MIN(latency_ms) as min_lat FROM proxies WHERE status = 'active' AND latency_ms > 0;").fetchone()
 
     db_size = os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0
     size_str = f"{db_size / 1024:.1f} KB" if db_size < 1024 * 1024 else f"{db_size / (1024 * 1024):.2f} MB"
@@ -1445,6 +1623,9 @@ def get_db_stats() -> dict:
         "db_size_formatted": size_str,
         "total_nodes": total,
         "active_nodes": active,
+        "dead_nodes": dead,
+        "avg_latency_ms": round(lat_row['avg_lat'], 1) if lat_row and lat_row['avg_lat'] else 0.0,
+        "min_latency_ms": round(lat_row['min_lat'], 1) if lat_row and lat_row['min_lat'] else 0.0,
         "protocol_counts": counts,
         "wal_mode": True
     }
@@ -1474,9 +1655,51 @@ def clear_db_records(mode: str = "failed") -> dict:
     }
 
 class ProxyHTTPHandler(BaseHTTPRequestHandler):
-    """高性能多线程 HTTP API 服务与全协议现代 Web 仪表盘"""
+    """高性能多线程 HTTP API 引擎与全协议实时分发 Web 仪表盘"""
+    
     def log_message(self, format, *args):
         pass
+
+    def address_string(self):
+        # 禁用反向 DNS 域名解析，杜绝代理环境下域名反查卡顿
+        return self.client_address[0]
+
+    def setup(self):
+        super().setup()
+        try:
+            self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+
+    def send_bytes(self, content: bytes, content_type: str = "text/plain; charset=utf-8", status_code: int = 200, extra_headers: dict = None):
+        """统一高性能响应发送：支持智能 Gzip 压缩、严格 Content-Length 与 Keep-Alive 声明"""
+        accept_encoding = self.headers.get("Accept-Encoding", "")
+        skip_gzip_paths = ['/nodes.txt', '/socks5.txt', '/https.txt', '/http.txt']
+        req_path = getattr(self, 'path', '').split('?')[0]
+        use_gzip = "gzip" in accept_encoding and len(content) > 512 and (req_path not in skip_gzip_paths)
+
+        final_body = gzip.compress(content, compresslevel=6) if use_gzip else content
+
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(final_body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Connection", "keep-alive")
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(final_body)
+
+    def send_json(self, data: dict | list, status_code: int = 200, extra_headers: dict = None):
+        content = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
+        self.send_bytes(content, content_type="application/json; charset=utf-8", status_code=status_code, extra_headers=extra_headers)
+
+    def send_text(self, text: str, content_type: str = "text/plain; charset=utf-8", status_code: int = 200, extra_headers: dict = None):
+        self.send_bytes(text.encode('utf-8'), content_type=content_type, status_code=status_code, extra_headers=extra_headers)
 
     def do_OPTIONS(self):
         """处理 CORS 预检请求"""
@@ -1485,86 +1708,87 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
         self.send_header('Access-Control-Max-Age', '86400')
+        self.send_header('Content-Length', '0')
         self.end_headers()
 
-
     def do_POST(self):
-        global POLL_INTERVAL, PROBE_TIMEOUT
+        global POLL_INTERVAL, PROBE_TIMEOUT, HEALTH_CHECK_INTERVAL, UPSTREAM_PROXY
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
         if path == '/api/config':
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
-            try:
-                data = json.loads(body) if body else {}
-            except Exception:
-                data = {}
+            try: data = json.loads(body) if body else {}
+            except Exception: data = {}
             updated = False
+
             if 'poll_interval' in data or 'interval' in data:
                 try:
                     v = int(data.get('poll_interval', data.get('interval')))
                     if 10 <= v <= 3600:
                         POLL_INTERVAL = v
-                        service_stats["poll_interval_sec"] = v
                         updated = True
-                        log(f"[参数配置] 轮询采集频率已更新为: {POLL_INTERVAL} 秒/轮")
-                except ValueError:
-                    pass
+                except ValueError: pass
+
             if 'probe_timeout' in data or 'timeout' in data:
                 try:
                     t = float(data.get('probe_timeout', data.get('timeout')))
                     if 0.5 <= t <= 10.0:
                         PROBE_TIMEOUT = t
                         updated = True
-                        log(f"[参数配置] 探测检测超时已更新为: {PROBE_TIMEOUT} 秒")
-                except ValueError:
-                    pass
+                except ValueError: pass
+
+            if 'health_check_interval' in data:
+                try:
+                    h = int(data.get('health_check_interval'))
+                    if 10 <= h <= 3600:
+                        HEALTH_CHECK_INTERVAL = h
+                        updated = True
+                except ValueError: pass
+
+            if 'upstream_proxy' in data:
+                UPSTREAM_PROXY = str(data.get('upstream_proxy')).strip()
+                updated = True
+
             if updated:
                 save_config()
                 if data.get('apply_now', False) or data.get('apply_now') in ['1', 'true', True]:
                     poll_event.set()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
+
             cfg = {
                 "status": "ok",
                 "updated": updated,
                 "poll_interval": POLL_INTERVAL,
                 "probe_timeout": PROBE_TIMEOUT,
-                "default_poll_interval": 60,
-                "default_probe_timeout": 1.8
+                "health_check_interval": HEALTH_CHECK_INTERVAL,
+                "upstream_proxy": UPSTREAM_PROXY
             }
-            self.wfile.write(json.dumps(cfg, ensure_ascii=False, indent=2).encode('utf-8'))
+            self.send_json(cfg)
+
         elif path == '/api/trigger':
             poll_event.set()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "message": "已向后台采集线程发送即时探测信号"}, ensure_ascii=False).encode('utf-8'))
+            self.send_json({"status": "ok", "message": "已向后台采集线程发送即时探测信号"})
+
+        elif path == '/api/health_check':
+            health_check_event.set()
+            threading.Thread(target=run_health_check_cycle, daemon=True).start()
+            self.send_json({"status": "ok", "message": "已触发全量节点存活健康复检与低延迟测速"})
+
         elif path == '/api/dedup':
             total, dups, invalid = init_dedup_cache(force_sync_files=True)
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            resp = {
+            self.send_json({
                 "status": "ok",
                 "message": "已完成全库去重与非法节点清除",
                 "total_captured": total,
                 "removed_duplicates": dups,
                 "removed_invalid": invalid
-            }
-            self.wfile.write(json.dumps(resp, ensure_ascii=False, indent=2).encode('utf-8'))
+            })
+
         elif path == '/api/import':
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 15 * 1024 * 1024:
-                self.send_response(413)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "error", "message": "上传内容过大，单次请小于 15MB"}, ensure_ascii=False).encode('utf-8'))
+                self.send_json({"status": "error", "message": "上传数据过大，单次限制 15MB"}, status_code=413)
                 return
 
             body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
@@ -1588,40 +1812,27 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
 
             candidates = parse_import_payload(raw_text, default_proto=default_proto)
             result = batch_import_nodes(candidates, verify_now=verify_now)
+            self.send_json(result)
 
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'))
         elif path == '/api/db/vacuum':
             with get_db() as conn:
                 conn.execute("VACUUM;")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "message": "数据库整理优化已完成 (VACUUM 执行完毕)"}, ensure_ascii=False).encode('utf-8'))
+            self.send_json({"status": "ok", "message": "数据库整理优化已完成 (VACUUM 执行完毕)"})
+
         elif path == '/api/db/clear':
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length).decode('utf-8', errors='ignore') if content_length > 0 else ""
-            try:
-                data = json.loads(body) if body else {}
-            except Exception:
-                data = {}
+            try: data = json.loads(body) if body else {}
+            except Exception: data = {}
             mode = data.get('mode', 'failed')
             res = clear_db_records(mode=mode)
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(res, ensure_ascii=False, indent=2).encode('utf-8'))
+            self.send_json(res)
+
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.send_json({"status": "error", "message": f"未找到该 POST 接口: {path}"}, status_code=404)
 
     def do_GET(self):
-        global POLL_INTERVAL, PROBE_TIMEOUT
+        global POLL_INTERVAL, PROBE_TIMEOUT, HEALTH_CHECK_INTERVAL, UPSTREAM_PROXY
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         params = urllib.parse.parse_qs(parsed.query)
@@ -1630,85 +1841,72 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
         if path in ['/nodes.txt', '/proxies.txt', '/https.txt', '/socks5.txt', '/http.txt']:
             raw_mode = params.get('raw', ['0'])[0] == '1'
             proto_filter = params.get('type', params.get('proto', ['']))[0].lower()
-            if path == '/https.txt':
-                proto_filter = 'https'
-            elif path == '/socks5.txt':
-                proto_filter = 'socks5'
-            elif path == '/http.txt':
-                proto_filter = 'http'
+            if path == '/https.txt': proto_filter = 'https'
+            elif path == '/socks5.txt': proto_filter = 'socks5'
+            elif path == '/http.txt': proto_filter = 'http'
 
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
+            alive_param = params.get('alive', ['1'])[0]
+            status_filter = 'all' if alive_param in ('0', 'all', 'false') else 'active'
+            sort_by = params.get('sort', ['latency'])[0].lower()
+            b64_mode = params.get('b64', ['0'])[0] == '1'
 
-            proxies_list, _ = read_all_proxies_from_disk()
+            try: max_lat = float(params.get('max_latency', ['0'])[0])
+            except ValueError: max_lat = 0.0
+            try: limit = int(params.get('limit', ['0'])[0])
+            except ValueError: limit = 0
+
+            proxies_list, _ = read_all_proxies_from_disk(proto_filter=proto_filter, status_filter=status_filter, sort_by=sort_by)
             out = []
             seen_out = set()
             for p in proxies_list:
-                line_proto = p["protocol"].lower()
-                if proto_filter and line_proto != proto_filter:
+                if max_lat > 0 and (p['latency_ms'] <= 0 or p['latency_ms'] > max_lat):
                     continue
                 endpoint = f"{p['ip']}:{p['port']}"
-                key = endpoint if raw_mode else f"{line_proto}://{endpoint}"
+                key = endpoint if raw_mode else f"{p['protocol']}://{endpoint}"
                 if key in seen_out:
                     continue
                 seen_out.add(key)
                 out.append(key)
-            self.wfile.write('\n'.join(out).encode('utf-8'))
+                if limit > 0 and len(out) >= limit:
+                    break
 
-        # 2. 详细元数据档案接口 (/detail.txt 或 /proxies_detail.txt)
+            txt_body = chr(10).join(out).encode('utf-8')
+            if b64_mode:
+                txt_body = base64.b64encode(txt_body)
+            self.send_bytes(txt_body, content_type="text/plain; charset=utf-8", extra_headers={'Cache-Control': 'no-cache, no-store'})
+
+        # 3. 详细元数据档案接口 (/detail.txt 或 /proxies_detail.txt)
         elif path in ['/detail.txt', '/proxies_detail.txt']:
             proto_filter = params.get('type', params.get('proto', ['']))[0].lower()
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
+            alive_param = params.get('alive', ['1'])[0]
+            status_filter = 'all' if alive_param in ('0', 'all', 'false') else 'active'
+            sort_by = params.get('sort', ['latency'])[0].lower()
 
-            proxies_list, _ = read_all_proxies_from_disk()
+            proxies_list, _ = read_all_proxies_from_disk(proto_filter=proto_filter, status_filter=status_filter, sort_by=sort_by)
             out_lines = []
             seen_detail = set()
             for p in proxies_list:
-                if proto_filter and p['protocol'] != proto_filter:
-                    continue
                 endpoint = f"{p['ip']}:{p['port']}"
                 if endpoint in seen_detail:
                     continue
                 seen_detail.add(endpoint)
-                out_lines.append(f"[{p['entry_time']}] | {p['protocol']}://{p['ip']}:{p['port']} | 地区: {p['location']} | 属性: {p['tags']}\n")
+                lat_str = f"{p['latency_ms']}ms" if p['latency_ms'] else "未测"
+                out_lines.append(f"[{p['entry_time']}] | {p['protocol']}://{p['ip']}:{p['port']} | 延迟: {lat_str} | 状态: {p['status']} | 地区: {p['location']} | 属性: {p['tags']}\n")
 
-            self.wfile.write(''.join(out_lines).encode('utf-8'))
+            self.send_bytes(''.join(out_lines).encode('utf-8'), content_type="text/plain; charset=utf-8", extra_headers={'Cache-Control': 'no-cache, no-store'})
 
-        # 2.1 触发即时全库去重检测与自检接口 (/api/dedup)
-        elif path == '/api/dedup':
-            total, dups, invalid = init_dedup_cache(force_sync_files=True)
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            resp = {
-                "status": "ok",
-                "message": "已完成全库去重与非法节点清除",
-                "total_captured": total,
-                "removed_duplicates": dups,
-                "removed_invalid": invalid
-            }
-            self.wfile.write(json.dumps(resp, ensure_ascii=False, indent=2).encode('utf-8'))
-        # 3. JSON 格式状态统计 (/api/stats)
+        # 4. JSON 格式状态统计 (/api/stats)
         elif path == '/api/stats':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
-
-            _, counts = read_all_proxies_from_disk()
+            _, counts = read_all_proxies_from_disk(status_filter="all")
             data = {
                 "status": "running",
                 "is_busy": service_stats["is_busy"],
+                "is_health_checking": service_stats["is_health_checking"],
                 "total_captured": counts["total"],
+                "active_count": counts["active"],
+                "dead_count": counts["dead"],
+                "avg_latency_ms": counts.get("avg_latency", 0.0),
+                "min_latency_ms": counts.get("min_latency", 0.0),
                 "protocol_counts": {
                     "https": counts.get("https", 0),
                     "socks5": counts.get("socks5", 0),
@@ -1719,13 +1917,10 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                 "poll_round": service_stats["poll_round"],
                 "poll_interval_sec": POLL_INTERVAL,
                 "probe_timeout_sec": PROBE_TIMEOUT,
+                "health_check_interval_sec": HEALTH_CHECK_INTERVAL,
+                "upstream_proxy": UPSTREAM_PROXY,
                 "last_poll_timestamp": service_stats["last_poll_timestamp"],
-                "defaults": {
-                    "poll_interval_sec": 60,
-                    "probe_timeout_sec": 1.8,
-                    "probe_workers": PROBE_WORKERS,
-                    "node_concurrency": NODE_CONCURRENCY
-                },
+                "health_stats": service_stats.get("health_stats", {}),
                 "last_message": service_stats["last_message"],
                 "endpoints": {
                     "all_nodes": "/nodes.txt",
@@ -1736,17 +1931,21 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                     "detail": "/detail.txt",
                     "api_proxies": "/api/proxies",
                     "api_export": "/api/export",
+                    "api_health_check": "/api/health_check",
                     "api_import": "/api/import",
                     "db_backup": "/api/db/backup",
                     "db_stats": "/api/db/stats"
                 }
             }
-            self.wfile.write(json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
+            self.send_json(data, extra_headers={'Cache-Control': 'no-cache, no-store'})
 
-        # 4. JSON 格式代理列表 (/api/proxies - 基于 SQLite 高性能检索与分页)
+        # 5. JSON 格式代理列表 (/api/proxies - 基于 SQLite 高性能检索与分页)
         elif path == '/api/proxies':
             proto_filter = params.get('type', params.get('proto', ['']))[0].lower()
             keyword = params.get('search', [''])[0].strip()
+            status_filter = params.get('status', [''])[0].lower()
+            sort_by = params.get('sort', ['latency'])[0].lower()
+
             limit_str = params.get('limit', ['0'])[0]
             limit = int(limit_str) if limit_str.isdigit() else 0
             page_str = params.get('page', ['0'])[0]
@@ -1754,34 +1953,40 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
             size_str = params.get('page_size', params.get('size', ['0']))[0]
             page_size = int(size_str) if size_str.isdigit() else 0
 
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
-
             with get_db() as conn:
-                cur = conn.execute("SELECT protocol, COUNT(*) as cnt FROM proxies GROUP BY protocol;")
-                counts = {"total": 0, "socks5": 0, "http": 0, "https": 0}
+                cur = conn.execute("SELECT status, protocol, COUNT(*) as cnt FROM proxies GROUP BY status, protocol;")
+                counts = {"total": 0, "active": 0, "dead": 0, "socks5": 0, "http": 0, "https": 0}
                 for r in cur.fetchall():
+                    st = r['status'].lower()
                     p = r['protocol'].lower()
                     c = r['cnt']
-                    counts[p] = c
                     counts['total'] += c
+                    if st == 'active':
+                        counts['active'] += c
+                        counts[p] = counts.get(p, 0) + c
+                    else:
+                        counts['dead'] += c
 
-                where_clauses = []
+                where_clauses = ["ip NOT LIKE '%X%'", "ip NOT LIKE '%x%'"]
                 params_list = []
                 if proto_filter:
                     where_clauses.append("protocol = ?")
                     params_list.append(proto_filter)
+                if status_filter and status_filter != 'all':
+                    where_clauses.append("status = ?")
+                    params_list.append(status_filter)
                 if keyword:
                     where_clauses.append("(protocol LIKE ? OR ip LIKE ? OR CAST(port AS TEXT) LIKE ? OR location LIKE ? OR tags LIKE ?)")
                     kw_arg = f"%{keyword}%"
                     params_list.extend([kw_arg, kw_arg, kw_arg, kw_arg, kw_arg])
 
                 where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-
                 total_filtered = conn.execute(f"SELECT COUNT(*) as cnt FROM proxies {where_sql};", params_list).fetchone()['cnt']
+
+                if sort_by == 'time':
+                    order_sql = "ORDER BY entry_time DESC"
+                else:
+                    order_sql = "ORDER BY (CASE WHEN latency_ms > 0 THEN latency_ms ELSE 99999 END) ASC, entry_time DESC"
 
                 limit_clause = ""
                 query_params = list(params_list)
@@ -1796,19 +2001,17 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                 else:
                     total_pages = 1
 
-                rows = conn.execute(f"SELECT entry_time, protocol, ip, port, location, tags, status, latency_ms FROM proxies {where_sql} ORDER BY entry_time DESC {limit_clause};", query_params).fetchall()
+                rows = conn.execute(f"SELECT entry_time, protocol, ip, port, location, tags, status, latency_ms FROM proxies {where_sql} {order_sql} {limit_clause};", query_params).fetchall()
 
                 proxies_out = []
                 for r in rows:
                     proto = r['protocol'].lower()
-                    ip = r['ip']
-                    port = r['port']
                     proxies_out.append({
                         "entry_time": r['entry_time'],
                         "protocol": proto,
-                        "ip": ip,
-                        "port": port,
-                        "url": f"{proto}://{ip}:{port}",
+                        "ip": r['ip'],
+                        "port": r['port'],
+                        "url": f"{proto}://{r['ip']}:{r['port']}",
                         "location": r['location'],
                         "tags": r['tags'],
                         "status": r['status'],
@@ -1817,6 +2020,8 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
 
             res = {
                 "total": counts["total"],
+                "active_total": counts["active"],
+                "dead_total": counts["dead"],
                 "filtered_count": total_filtered,
                 "page": page if page > 0 else 1,
                 "page_size": page_size if page_size > 0 else total_filtered,
@@ -1828,75 +2033,37 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                 },
                 "proxies": proxies_out
             }
-            self.wfile.write(json.dumps(res, ensure_ascii=False, indent=2).encode('utf-8'))
+            self.send_json(res, extra_headers={'Cache-Control': 'no-cache, no-store'})
 
-        # 5.1 配置读取与设置 (/api/config)
+        # 6. 配置读取 (/api/config)
         elif path == '/api/config':
-            new_interval = params.get('interval', params.get('poll_interval', [None]))[0]
-            new_timeout = params.get('timeout', params.get('probe_timeout', [None]))[0]
-            updated = False
-
-            if new_interval is not None:
-                try:
-                    val = int(new_interval)
-                    if 10 <= val <= 3600:
-                        POLL_INTERVAL = val
-                        service_stats["poll_interval_sec"] = val
-                        updated = True
-                        log(f"[参数配置] 轮询采集频率已更新为: {POLL_INTERVAL} 秒/轮")
-                except ValueError:
-                    pass
-
-            if new_timeout is not None:
-                try:
-                    fval = float(new_timeout)
-                    if 0.5 <= fval <= 10.0:
-                        PROBE_TIMEOUT = fval
-                        updated = True
-                        log(f"[参数配置] 单次探测超时已更新为: {PROBE_TIMEOUT} 秒")
-                except ValueError:
-                    pass
-
-            if updated:
-                save_config()
-                if params.get('apply_now', ['0'])[0] in ['1', 'true']:
-                    poll_event.set()
-
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
-
             cfg = {
                 "status": "ok",
-                "updated": updated,
                 "poll_interval": POLL_INTERVAL,
                 "probe_timeout": PROBE_TIMEOUT,
-                "default_poll_interval": 60,
-                "default_probe_timeout": 1.8,
+                "health_check_interval": HEALTH_CHECK_INTERVAL,
+                "upstream_proxy": UPSTREAM_PROXY,
                 "probe_workers": PROBE_WORKERS,
                 "node_concurrency": NODE_CONCURRENCY
             }
-            self.wfile.write(json.dumps(cfg, ensure_ascii=False, indent=2).encode('utf-8'))
+            self.send_json(cfg, extra_headers={'Cache-Control': 'no-cache, no-store'})
 
-        # 5. 手动触发即时采集探测 (/api/trigger)
+        # 7. 手动触发即时采集探测 (/api/trigger)
         elif path == '/api/trigger':
             poll_event.set()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "message": "已向后台采集线程发送即时探测信号"}, ensure_ascii=False).encode('utf-8'))
+            self.send_json({"status": "ok", "message": "已向后台采集线程发送即时探测信号"})
 
-        # 6. 健康检查 (/health)
+        # 8. 触发即时全量健康体检与测速 (/api/health_check)
+        elif path == '/api/health_check':
+            health_check_event.set()
+            threading.Thread(target=run_health_check_cycle, daemon=True).start()
+            self.send_json({"status": "ok", "message": "已触发全量节点健康检查与低延迟测速"})
+
+        # 9. 健康检查探针 (/health)
         elif path == '/health':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok"}')
+            self.send_bytes(b'{"status":"ok"}', content_type='application/json')
 
-        # 6.1 全量与条件数据导出 (/api/export - 支持 CSV / JSON / TXT / DETAIL / DB)
+        # 10. 全量多格式数据导出 (/api/export)
         elif path == '/api/export':
             fmt = params.get('format', ['csv'])[0].lower()
             proto = params.get('type', params.get('proto', ['all']))[0].lower()
@@ -1911,68 +2078,59 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                 raw=raw,
                 keyword=kw
             )
+            self.send_bytes(content, content_type=content_type, extra_headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Cache-Control': 'no-cache, no-store'
+            })
 
-            self.send_response(200)
-            self.send_header('Content-Type', content_type)
-            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
-            self.wfile.write(content)
-
-        # 6.2 SQLite 数据库安全快照备份下载 (/api/db/backup)
+        # 11. 数据库备份与状态
         elif path == '/api/db/backup':
             content, content_type, filename = export_proxies_data(export_fmt="sqlite")
-            self.send_response(200)
-            self.send_header('Content-Type', content_type)
-            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
-            self.wfile.write(content)
+            self.send_bytes(content, content_type=content_type, extra_headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Cache-Control': 'no-cache, no-store'
+            })
 
-        # 6.3 数据库存储状态信息 (/api/db/stats)
         elif path == '/api/db/stats':
             stats_info = get_db_stats()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
-            self.wfile.write(json.dumps(stats_info, ensure_ascii=False, indent=2).encode('utf-8'))
+            self.send_json(stats_info, extra_headers={'Cache-Control': 'no-cache, no-store'})
 
-        # 6.5 未匹配的 /api/ 路径严格返回 JSON 404，绝不回退至 HTML
+        elif path == '/api/dedup':
+            total, dups, invalid = init_dedup_cache(force_sync_files=True)
+            self.send_json({
+                "status": "ok",
+                "message": "已完成全库去重与非法节点清除",
+                "total_captured": total,
+                "removed_duplicates": dups,
+                "removed_invalid": invalid
+            })
+
         elif path.startswith('/api/'):
-            self.send_response(404)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "error", "message": f"未找到该 API 端点: {path}"}, ensure_ascii=False).encode('utf-8'))
+            self.send_json({"status": "error", "message": f"未找到该 API 节点: {path}"}, status_code=404)
 
-        # 7. 仪表盘首页 (/)
+        # 12. 仪表盘首页 (/)
         else:
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.end_headers()
-
             if os.path.exists(DASHBOARD_FILE):
                 with open(DASHBOARD_FILE, 'r', encoding='utf-8', errors='ignore') as f:
                     html_content = f.read()
-                self.wfile.write(html_content.encode('utf-8'))
+                self.send_text(html_content, content_type='text/html; charset=utf-8')
             else:
-                self.wfile.write(b"<h1>Dashboard file not found.</h1>")
+                self.send_text("<h1>Dashboard file not found.</h1>", content_type='text/html; charset=utf-8', status_code=404)
 
 def main():
     log("=" * 70)
-    log("正在启动北极光代理实时监控采集与智能分发系统 (v2.5 全协议增强版)...")
+    log("北极光代理实时监控采集与全协议分发系统 (v2.6 极速优化版)...")
     load_config()
     init_dedup_cache()
 
-    # 启动后台监控与探测调度线程
-    t = threading.Thread(target=monitor_loop, daemon=True)
-    t.start()
+    # 1. 启动后台抓取探测守护线程
+    t_monitor = threading.Thread(target=monitor_loop, daemon=True)
+    t_monitor.start()
 
-    # 独占端口检测与 Linux/Windows 套接字端口复用配置
+    # 2. 启动后台存量节点健康检查与测速守护线程
+    t_health = threading.Thread(target=health_check_loop, daemon=True)
+    t_health.start()
+
     if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
         ThreadingHTTPServer.allow_reuse_address = False
     else:
@@ -1981,10 +2139,9 @@ def main():
     try:
         server = ThreadingHTTPServer((API_HOST, API_PORT), ProxyHTTPHandler)
     except OSError as e:
-        log(f"[启动失败] 端口 {API_PORT} 绑定失败 (可能有其他实例已在运行): {e}")
+        log(f"[绑定失败] 端口 {API_PORT} 绑定失败: {e}")
         sys.exit(1)
 
-    # 注册优雅停机信号 (支持 Linux SIGTERM / SIGINT，完美适配 Docker stop 与 systemd 停机)
     stop_event = threading.Event()
     def graceful_shutdown(signum=None, frame=None):
         if not stop_event.is_set():
@@ -2005,11 +2162,9 @@ def main():
     log(f"  [2] 专属 HTTPS 接口:  http://localhost:{API_PORT}/https.txt")
     log(f"  [3] 专属 SOCKS5 接口: http://localhost:{API_PORT}/socks5.txt")
     log(f"  [4] 专属 HTTP 接口:   http://localhost:{API_PORT}/http.txt")
-    log(f"  [5] 纯 IP:Port 接口:  http://localhost:{API_PORT}/nodes.txt?raw=1")
-    log(f"  [6] 完整档案接口:     http://localhost:{API_PORT}/detail.txt")
-    log(f"  [7] 状态统计接口:     http://localhost:{API_PORT}/api/stats")
-    log(f"  [8] 健康检查探针:     http://localhost:{API_PORT}/health")
-    log(f"  [9] 现代化仪表盘首页: http://localhost:{API_PORT}/")
+    log(f"  [5] 状态统计接口:     http://localhost:{API_PORT}/api/stats")
+    log(f"  [6] 健康检查探针:     http://localhost:{API_PORT}/health")
+    log(f"  [7] 现代化仪表盘首页: http://localhost:{API_PORT}/")
     log("=" * 70)
 
     try:
@@ -2018,7 +2173,7 @@ def main():
         graceful_shutdown()
     finally:
         server.server_close()
-        log("HTTP 服务与后台资源已清理完毕，进程安全退出。")
+        log("HTTP 服务器后台资源清理完毕，进程安全退出。")
 
 if __name__ == '__main__':
     main()
