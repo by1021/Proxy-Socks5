@@ -1292,24 +1292,24 @@
 
         <div class="stats-grid">
             <div class="stat-card all" onclick="setProtocolFilter('')">
-                <div class="stat-head"><span>总有效节点</span><span>🌐</span></div>
+                <div class="stat-head"><span>总节点</span><span>🌐</span></div>
                 <div class="stat-value" id="stat-total">0</div>
-                <div class="stat-desc">已入库且校验通过的全部节点</div>
+                <div class="stat-desc" id="stat-total-desc">有效: <span id="stat-total-active" style="color:#10b981;font-weight:600;">0</span> · 离线: <span id="stat-total-dead" style="color:#ef4444;">0</span></div>
             </div>
             <div class="stat-card https" onclick="setProtocolFilter('https')">
-                <div class="stat-head"><span>HTTPS 代理 (NEW)</span><span>🔒</span></div>
+                <div class="stat-head"><span>HTTPS 代理</span><span>🔒</span></div>
                 <div class="stat-value" id="stat-https">0</div>
-                <div class="stat-desc">TLS 握手 + 443 安全隧道已验证</div>
+                <div class="stat-desc" id="stat-desc-https">有效: <span id="stat-https-active" style="color:#10b981;font-weight:600;">0</span> · 离线: <span id="stat-https-dead" style="color:#ef4444;">0</span></div>
             </div>
             <div class="stat-card socks5" onclick="setProtocolFilter('socks5')">
                 <div class="stat-head"><span>SOCKS5 代理</span><span>⚡</span></div>
                 <div class="stat-value" id="stat-socks5">0</div>
-                <div class="stat-desc">握手确认 + CONNECT 转发已通</div>
+                <div class="stat-desc" id="stat-desc-socks5">有效: <span id="stat-socks5-active" style="color:#10b981;font-weight:600;">0</span> · 离线: <span id="stat-socks5-dead" style="color:#ef4444;">0</span></div>
             </div>
             <div class="stat-card http" onclick="setProtocolFilter('http')">
                 <div class="stat-head"><span>HTTP 代理</span><span>🌍</span></div>
                 <div class="stat-value" id="stat-http">0</div>
-                <div class="stat-desc">CONNECT / GET 真实穿透已通</div>
+                <div class="stat-desc" id="stat-desc-http">有效: <span id="stat-http-active" style="color:#10b981;font-weight:600;">0</span> · 离线: <span id="stat-http-dead" style="color:#ef4444;">0</span></div>
             </div>
             <div class="stat-card" style="cursor: pointer;" onclick="triggerHealthCheck()">
                 <div class="stat-head"><span>平均延迟 (Ping)</span><span>📶</span></div>
@@ -1338,6 +1338,14 @@
                 <button class="tab-btn" id="tab-http" onclick="setProtocolFilter('http')">
                     🌐 HTTP <span class="tab-badge" id="badge-http">0</span>
                 </button>
+            </div>
+
+            <div style="display:flex; align-items:center;">
+                <select id="status-filter-select" class="form-input" style="padding: 7px 12px; font-size: 13px; height: 38px; border-radius: 10px; cursor: pointer; min-width: 136px;" onchange="handleStatusFilterChange(this.value)">
+                    <option value="all" selected>全部状态 (总节点)</option>
+                    <option value="active">🟢 仅有效 (活跃)</option>
+                    <option value="dead">⚠️ 仅离线节点</option>
+                </select>
             </div>
 
             <div class="search-box">
@@ -1763,6 +1771,7 @@ http://45.140.146.12:8080
     <script>
         let allProxies = [];
         let currentFilter = '';
+        let currentStatusFilter = 'all';
         let currentSearch = '';
         let pollIntervalSec = 60;
         let lastPollTimestamp = 0;
@@ -2030,14 +2039,22 @@ http://45.140.146.12:8080
             if (currentFilter) {
                 list = list.filter(p => p.protocol === currentFilter);
             }
+            if (currentStatusFilter && currentStatusFilter !== 'all') {
+                list = list.filter(p => (p.status || 'active').toLowerCase() === currentStatusFilter);
+            }
             if (currentSearch) {
                 const q = currentSearch.toLowerCase();
                 list = list.filter(p => {
-                    const full = `${p.protocol} ${p.ip} ${p.port} ${p.location} ${p.tags}`.toLowerCase();
+                    const full = `${p.protocol} ${p.ip} ${p.port} ${p.location} ${p.tags} ${p.status}`.toLowerCase();
                     return full.includes(q);
                 });
             }
             return list;
+        }
+
+        function handleStatusFilterChange(val) {
+            currentStatusFilter = val || 'all';
+            renderTable(true);
         }
 
         function renderTable(resetPage = false) {
@@ -2317,27 +2334,57 @@ http://45.140.146.12:8080
             if (isDataLoading) return;
             isDataLoading = true;
             Promise.all([
-                fetch('/api/proxies?status=active&sort=latency').then(r => r.json()),
+                fetch('/api/proxies?status=all&sort=latency').then(r => r.json()),
                 fetch('/api/stats').then(r => r.json())
             ]).then(([proxiesData, statsData]) => {
                 allProxies = proxiesData.proxies || [];
-                const counts = proxiesData.protocol_counts || {};
+                const counts = proxiesData.protocol_counts || statsData.protocol_counts || {};
+                const activeCounts = proxiesData.protocol_active_counts || statsData.protocol_active_counts || {};
+                const deadCounts = proxiesData.protocol_dead_counts || statsData.protocol_dead_counts || {};
 
-                const activeCount = proxiesData.active_total !== undefined ? proxiesData.active_total : allProxies.length;
-                document.getElementById('stat-total').innerText = activeCount;
-                document.getElementById('stat-https').innerText = counts.https || 0;
-                document.getElementById('stat-socks5').innerText = counts.socks5 || 0;
-                document.getElementById('stat-http').innerText = counts.http || 0;
+                const totalNodes = (proxiesData.total !== undefined) ? proxiesData.total : (statsData.total_captured || allProxies.length);
+                const activeNodes = (proxiesData.active_total !== undefined) ? proxiesData.active_total : (statsData.active_count || 0);
+                const deadNodes = (proxiesData.dead_total !== undefined) ? proxiesData.dead_total : (statsData.dead_count || Math.max(0, totalNodes - activeNodes));
+
+                // 核心卡片 1：显示总节点，并展示有效与离线分布
+                document.getElementById('stat-total').innerText = totalNodes;
+                const totalActiveElem = document.getElementById('stat-total-active');
+                const totalDeadElem = document.getElementById('stat-total-dead');
+                if (totalActiveElem) totalActiveElem.innerText = activeNodes;
+                if (totalDeadElem) totalDeadElem.innerText = deadNodes;
+
+                // 协议卡片 2-4：展示各协议总节点数，副文本展示有效与离线分布
+                const httpsTotal = counts.https || 0;
+                const httpsActive = activeCounts.https || 0;
+                const httpsDead = deadCounts.https || Math.max(0, httpsTotal - httpsActive);
+                document.getElementById('stat-https').innerText = httpsTotal;
+                const descHttps = document.getElementById('stat-desc-https');
+                if (descHttps) descHttps.innerHTML = `有效: <span style="color:#10b981;font-weight:600;">${httpsActive}</span> · 离线: <span style="color:#ef4444;">${httpsDead}</span>`;
+
+                const socks5Total = counts.socks5 || 0;
+                const socks5Active = activeCounts.socks5 || 0;
+                const socks5Dead = deadCounts.socks5 || Math.max(0, socks5Total - socks5Active);
+                document.getElementById('stat-socks5').innerText = socks5Total;
+                const descSocks5 = document.getElementById('stat-desc-socks5');
+                if (descSocks5) descSocks5.innerHTML = `有效: <span style="color:#10b981;font-weight:600;">${socks5Active}</span> · 离线: <span style="color:#ef4444;">${socks5Dead}</span>`;
+
+                const httpTotal = counts.http || 0;
+                const httpActive = activeCounts.http || 0;
+                const httpDead = deadCounts.http || Math.max(0, httpTotal - httpActive);
+                document.getElementById('stat-http').innerText = httpTotal;
+                const descHttp = document.getElementById('stat-desc-http');
+                if (descHttp) descHttp.innerHTML = `有效: <span style="color:#10b981;font-weight:600;">${httpActive}</span> · 离线: <span style="color:#ef4444;">${httpDead}</span>`;
 
                 const avgLatElem = document.getElementById('stat-avg-lat');
                 if (avgLatElem) avgLatElem.innerText = statsData.avg_latency_ms ? `${statsData.avg_latency_ms}ms` : '--';
                 const minLatElem = document.getElementById('stat-min-lat');
                 if (minLatElem) minLatElem.innerText = statsData.min_latency_ms ? statsData.min_latency_ms : '--';
 
-                document.getElementById('badge-all').innerText = proxiesData.total || allProxies.length;
-                document.getElementById('badge-https').innerText = counts.https || 0;
-                document.getElementById('badge-socks5').innerText = counts.socks5 || 0;
-                document.getElementById('badge-http').innerText = counts.http || 0;
+                // 徽章显示各协议总节点数
+                document.getElementById('badge-all').innerText = totalNodes;
+                document.getElementById('badge-https').innerText = httpsTotal;
+                document.getElementById('badge-socks5').innerText = socks5Total;
+                document.getElementById('badge-http').innerText = httpTotal;
 
                 if (statsData.poll_round !== undefined) {
                     document.getElementById('stat-round').innerText = `第 ${statsData.poll_round} 轮`;

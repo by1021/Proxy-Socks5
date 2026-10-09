@@ -194,7 +194,7 @@ ssl_ctx.verify_mode = ssl.CERT_NONE
 
 seen_fingerprints = set()
 masked_cache = {}                    # 缓存已探测结果，避免周期内重复无效探测
-data_lock = threading.Lock()
+data_lock = threading.RLock()
 poll_event = threading.Event()
 health_check_event = threading.Event()
 is_polling_active = False
@@ -503,7 +503,13 @@ def read_all_proxies_from_disk(proto_filter="", status_filter="active", sort_by=
     默认过滤离线失效节点 (status='active')，并按真实延迟由低到高升序排列
     """
     proxies_list = []
-    counts = {"total": 0, "active": 0, "dead": 0, "socks5": 0, "http": 0, "https": 0, "avg_latency": 0.0, "min_latency": 0.0}
+    counts = {
+        "total": 0, "active": 0, "dead": 0,
+        "socks5": 0, "http": 0, "https": 0,
+        "active_socks5": 0, "active_http": 0, "active_https": 0,
+        "dead_socks5": 0, "dead_http": 0, "dead_https": 0,
+        "avg_latency": 0.0, "min_latency": 0.0
+    }
 
     try:
         with get_db() as conn:
@@ -513,11 +519,13 @@ def read_all_proxies_from_disk(proto_filter="", status_filter="active", sort_by=
                 proto = r['protocol'].lower()
                 c = r['cnt']
                 counts['total'] += c
+                counts[proto] = counts.get(proto, 0) + c
                 if st == 'active':
                     counts['active'] += c
-                    counts[proto] = counts.get(proto, 0) + c
+                    counts[f"active_{proto}"] = counts.get(f"active_{proto}", 0) + c
                 else:
                     counts['dead'] += c
+                    counts[f"dead_{proto}"] = counts.get(f"dead_{proto}", 0) + c
 
             lat_row = conn.execute("SELECT AVG(latency_ms) as avg_lat, MIN(latency_ms) as min_lat FROM proxies WHERE status='active' AND latency_ms > 0;").fetchone()
             if lat_row and lat_row['avg_lat'] is not None:
@@ -580,7 +588,10 @@ def init_dedup_cache(force_sync_files: bool = True):
                 sync_disk_files_from_db(conn)
 
             service_stats["total_captured"] = len(rows)
-            log(f"[本地数据库就绪] 已加载 {len(rows)} 个唯一合法有效节点 (存储文件: {DB_FILE})")
+            active_cnt = sum(1 for r in rows if dict(r).get('status', 'active') == 'active')
+            service_stats["active_count"] = active_cnt
+            service_stats["dead_count"] = len(rows) - active_cnt
+            log(f"[本地数据库就绪] 已加载 {len(rows)} 个唯一合法总节点 (有效: {active_cnt}, 离线: {len(rows) - active_cnt} | 存储文件: {DB_FILE})")
             return len(rows), 0, 0
 # ==============================================================
 
@@ -728,9 +739,12 @@ def save_single_node(node: dict) -> bool:
             log(f"[数据库写入异常] {e}")
             return False
 
+        is_new = (fp_proto not in seen_fingerprints and fp_raw not in seen_fingerprints)
         seen_fingerprints.add(fp_proto)
         seen_fingerprints.add(fp_raw)
-        service_stats["total_captured"] += 1
+        if is_new:
+            service_stats["total_captured"] += 1
+            service_stats["active_count"] = service_stats.get("active_count", 0) + 1
 
     log(f"[+ 成功收录入库] {fp_proto} | 延迟: {latency_ms}ms | 地区: {location} | 属性: {tags}")
     return True
@@ -748,8 +762,10 @@ def process_node(node: dict):
             cached_res, cache_time = masked_cache[row_key]
             if cached_res is None and (now - cache_time < 600):
                 return None
-            if cached_res and (f"{protocol}://{cached_res[0]}:{port}" in seen_fingerprints or f"{cached_res[0]}:{port}" in seen_fingerprints):
-                return None
+            if cached_res:
+                real_ip_cached = cached_res[0] if isinstance(cached_res, (list, tuple)) else cached_res
+                if real_ip_cached and (f"{protocol}://{real_ip_cached}:{port}" in seen_fingerprints or f"{real_ip_cached}:{port}" in seen_fingerprints):
+                    return None
 
     res = unmask_and_verify(protocol, raw_ip, port)
     with data_lock:
@@ -767,11 +783,6 @@ def process_node(node: dict):
     node['latency_ms'] = lat_ms
     fp_proto = f"{protocol}://{real_ip}:{port}"
     fp_raw = f"{real_ip}:{port}"
-
-    with data_lock:
-        if fp_proto in seen_fingerprints or fp_raw in seen_fingerprints:
-            save_single_node(node)
-            return node
 
     if save_single_node(node):
         return node
@@ -813,11 +824,13 @@ def run_collection_cycle():
             row_key = f"{n['protocol']}:{n['ip']}:{n['port']}:{n['entry_time']}"
             with data_lock:
                 if row_key in masked_cache:
-                    cached_ip, ctime = masked_cache[row_key]
-                    if cached_ip is None and (time.time() - ctime < 600):
+                    cached_res, ctime = masked_cache[row_key]
+                    if cached_res is None and (time.time() - ctime < 600):
                         continue
-                    if cached_ip and (f"{cached_ip}:{n['port']}" in seen_fingerprints or f"{n['protocol']}://{cached_ip}:{n['port']}" in seen_fingerprints):
-                        continue
+                    if cached_res:
+                        real_ip_cached = cached_res[0] if isinstance(cached_res, (list, tuple)) else cached_res
+                        if real_ip_cached and (f"{real_ip_cached}:{n['port']}" in seen_fingerprints or f"{n['protocol']}://{real_ip_cached}:{n['port']}" in seen_fingerprints):
+                            continue
             candidates.append(n)
 
         if candidates:
@@ -827,9 +840,11 @@ def run_collection_cycle():
         else:
             log("本轮所有展示节点均已在库中或近期已验证，无需重复探测。")
 
-        _, counts = read_all_proxies_from_disk()
+        _, counts = read_all_proxies_from_disk(status_filter="all")
         service_stats["total_captured"] = counts["total"]
-        service_stats["last_message"] = f"第 {service_stats['poll_round']} 轮完成，库中累计有效节点: {counts['total']} (HTTPS: {counts.get('https', 0)}, SOCKS5: {counts.get('socks5', 0)}, HTTP: {counts.get('http', 0)})"
+        service_stats["active_count"] = counts["active"]
+        service_stats["dead_count"] = counts["dead"]
+        service_stats["last_message"] = f"第 {service_stats['poll_round']} 轮完成，库中累计总节点: {counts['total']} (有效: {counts.get('active', 0)}, 离线: {counts.get('dead', 0)} | HTTPS: {counts.get('https', 0)}, SOCKS5: {counts.get('socks5', 0)}, HTTP: {counts.get('http', 0)})"
         log(f"=== {service_stats['last_message']} ===\n")
     except Exception as e:
         log(f"采集轮询异常: {e}")
@@ -844,7 +859,10 @@ def monitor_loop():
     global POLL_INTERVAL
     log(f"后台监控采集线程已就绪，周期为 {POLL_INTERVAL} 秒/轮")
     while True:
-        run_collection_cycle()
+        try:
+            run_collection_cycle()
+        except Exception as e:
+            log(f"[监控线程异常] {e}")
         poll_event.wait(POLL_INTERVAL)
         poll_event.clear()
 
@@ -936,7 +954,10 @@ def health_check_loop():
     global HEALTH_CHECK_INTERVAL
     time.sleep(2)
     while True:
-        run_health_check_cycle()
+        try:
+            run_health_check_cycle()
+        except Exception as e:
+            log(f"[健康测速线程异常] {e}")
         health_check_event.wait(HEALTH_CHECK_INTERVAL)
         health_check_event.clear()
 
@@ -1912,6 +1933,16 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                     "socks5": counts.get("socks5", 0),
                     "http": counts.get("http", 0)
                 },
+                "protocol_active_counts": {
+                    "https": counts.get("active_https", 0),
+                    "socks5": counts.get("active_socks5", 0),
+                    "http": counts.get("active_http", 0)
+                },
+                "protocol_dead_counts": {
+                    "https": counts.get("dead_https", 0),
+                    "socks5": counts.get("dead_socks5", 0),
+                    "http": counts.get("dead_http", 0)
+                },
                 "last_poll_time": service_stats["last_poll_time"],
                 "start_time": service_stats["start_time"],
                 "poll_round": service_stats["poll_round"],
@@ -1955,17 +1986,24 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
 
             with get_db() as conn:
                 cur = conn.execute("SELECT status, protocol, COUNT(*) as cnt FROM proxies GROUP BY status, protocol;")
-                counts = {"total": 0, "active": 0, "dead": 0, "socks5": 0, "http": 0, "https": 0}
+                counts = {
+                    "total": 0, "active": 0, "dead": 0,
+                    "socks5": 0, "http": 0, "https": 0,
+                    "active_socks5": 0, "active_http": 0, "active_https": 0,
+                    "dead_socks5": 0, "dead_http": 0, "dead_https": 0
+                }
                 for r in cur.fetchall():
                     st = r['status'].lower()
                     p = r['protocol'].lower()
                     c = r['cnt']
                     counts['total'] += c
+                    counts[p] = counts.get(p, 0) + c
                     if st == 'active':
                         counts['active'] += c
-                        counts[p] = counts.get(p, 0) + c
+                        counts[f"active_{p}"] = counts.get(f"active_{p}", 0) + c
                     else:
                         counts['dead'] += c
+                        counts[f"dead_{p}"] = counts.get(f"dead_{p}", 0) + c
 
                 where_clauses = ["ip NOT LIKE '%X%'", "ip NOT LIKE '%x%'"]
                 params_list = []
@@ -2030,6 +2068,16 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
                     "https": counts.get("https", 0),
                     "socks5": counts.get("socks5", 0),
                     "http": counts.get("http", 0)
+                },
+                "protocol_active_counts": {
+                    "https": counts.get("active_https", 0),
+                    "socks5": counts.get("active_socks5", 0),
+                    "http": counts.get("active_http", 0)
+                },
+                "protocol_dead_counts": {
+                    "https": counts.get("dead_https", 0),
+                    "socks5": counts.get("dead_socks5", 0),
+                    "http": counts.get("dead_http", 0)
                 },
                 "proxies": proxies_out
             }
@@ -2117,6 +2165,14 @@ class ProxyHTTPHandler(BaseHTTPRequestHandler):
             else:
                 self.send_text("<h1>Dashboard file not found.</h1>", content_type='text/html; charset=utf-8', status_code=404)
 
+class SilentThreadingHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        exc_type, _, _ = sys.exc_info()
+        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError):
+            return
+        super().handle_error(request, client_address)
+
+
 def main():
     log("=" * 70)
     log("北极光代理实时监控采集与全协议分发系统 (v2.6 极速优化版)...")
@@ -2137,7 +2193,7 @@ def main():
         ThreadingHTTPServer.allow_reuse_address = True
 
     try:
-        server = ThreadingHTTPServer((API_HOST, API_PORT), ProxyHTTPHandler)
+        server = SilentThreadingHTTPServer((API_HOST, API_PORT), ProxyHTTPHandler)
     except OSError as e:
         log(f"[绑定失败] 端口 {API_PORT} 绑定失败: {e}")
         sys.exit(1)
